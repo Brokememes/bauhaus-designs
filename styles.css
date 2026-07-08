@@ -706,11 +706,14 @@ em { font-style: italic; }
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: clamp(1.2rem, 2.4vw, 2.2rem);
 }
-.pcard { background: var(--surface-2); border: 1px solid transparent; transition: border-color 400ms var(--ease-out), transform 400ms var(--ease-out); }
-.pcard:hover { border-color: var(--line); transform: translateY(-4px); }
-.pcard figure { overflow: hidden; aspect-ratio: 4 / 3; }
-.pcard img { width: 100%; height: 100%; object-fit: cover; transition: transform 1s var(--ease-out); }
-.pcard:hover img { transform: scale(1.04); }
+.pcard { display: block; background: var(--surface-2); border: 1px solid transparent; transition: border-color 400ms var(--ease-out), transform 400ms var(--ease-out); }
+.pcard:hover { border-color: var(--brass-soft); transform: translateY(-4px); }
+.pcard figure { overflow: hidden; aspect-ratio: 4 / 3; background: #211b13; display: grid; place-items: center; }
+.pcard img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; transition: transform 1s var(--ease-out); }
+.pcard:hover img { transform: scale(1.03); }
+.pcard-view { font-size: 0.72rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--brass); margin-top: 0.9rem; opacity: 0.75; transition: opacity 300ms; }
+.pcard:hover .pcard-view { opacity: 1; }
+.pgrid-3 { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
 .pcard-body { padding: 1.3rem 1.4rem 1.5rem; }
 .pcard-body h3 { font-size: 1.25rem; }
 .spec { font-size: 0.8rem; letter-spacing: 0.08em; color: var(--ivory-dim); margin-top: 0.4rem; }
@@ -798,3 +801,49 @@ em { font-style: italic; }
 
 /* journal teaser on home */
 .jteaser { padding: var(--space-section) var(--gutter); max-width: 1400px; margin: 0 auto; }
+
+/* ---------- product detail page ---------- */
+
+.pdp {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: clamp(2rem, 4.5vw, 5rem);
+  align-items: start;
+  padding: clamp(7rem, 13vh, 9.5rem) var(--gutter) clamp(3rem, 6vw, 5rem);
+  max-width: 1400px;
+  margin: 0 auto;
+}
+.pdp-media {
+  position: sticky;
+  top: 6rem;
+  background: #211b13;
+  border: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  padding: clamp(1rem, 2.5vw, 2.5rem);
+}
+.pdp-media img { max-width: 100%; height: auto; max-height: 76vh; object-fit: contain; }
+
+.pdp-info h1 { font-size: clamp(2rem, 1.4rem + 2.6vw, 3.6rem); letter-spacing: -0.01em; }
+.pdp-spec { margin-top: 0.7rem; font-size: 0.88rem; }
+
+.pdp-price { margin-top: 1.6rem; padding: 1.2rem 1.4rem; background: var(--surface-2); border-left: 2px solid var(--brass); }
+.pdp-price .price { margin-top: 0; font-size: 1.5rem; }
+.pdp-price .price s { font-size: 0.62em; }
+.pdp-price-note { font-size: 0.76rem; color: var(--ivory-dim); margin-top: 0.4rem; }
+
+.pdp-ctas { display: grid; gap: 0.8rem; margin-top: 1.8rem; }
+.btn-wide { text-align: center; }
+.pdp-visit-link { font-size: 0.82rem; color: var(--ivory-dim); text-align: center; padding-top: 0.3rem; transition: color 300ms; }
+.pdp-visit-link:hover { color: var(--brass); }
+
+.pdp-specs { margin-top: 2.4rem; border-top: 1px solid var(--line); }
+.spec-row { display: grid; grid-template-columns: 130px 1fr; gap: 1.2rem; padding: 1rem 0.2rem; border-bottom: 1px solid var(--line); }
+.spec-row dt { font-size: 0.68rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--brass); padding-top: 0.2em; }
+.spec-row dd { font-size: 0.92rem; color: var(--ivory-dim); line-height: 1.7; }
+
+@media (max-width: 900px) {
+  .pdp { grid-template-columns: 1fr; }
+  .pdp-media { position: static; }
+  .spec-row { grid-template-columns: 1fr; gap: 0.3rem; }
+}
