@@ -21,7 +21,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="preload" as="image" href="assets/hero-luxury-sofa-bangalore.webp" fetchpriority="high">
+<link rel="preload" as="image" href="assets/hero-fullscreen-showroom.webp" fetchpriority="high" media="(min-width: 701px)">
+<link rel="preload" as="image" href="assets/hero-luxury-sofa-bangalore.webp" fetchpriority="high" media="(max-width: 700px)">
 <link rel="stylesheet" href="styles.css">
 <script type="application/ld+json">
 {
@@ -94,18 +95,25 @@
       <li><a href="about/">About</a></li>
       <li><a href="journal/">Journal</a></li>
       <li><a href="visit/">Visit Showroom</a></li>
+      <li class="nav-phone"><a href="tel:+917019080438">+91 70190 80438</a></li>
     </ul>
     <a class="nav-cta" href="tel:+917019080438">+91 70190 80438</a>
+    <button class="nav-toggle" aria-label="Menu" aria-expanded="false"><span></span><span></span></button>
   </nav>
 </header>
 
 <main>
 
   <!-- ============ HERO ============ -->
-  <section class="hero" aria-labelledby="hero-heading">
-    <div class="hero-text">
+  <section class="hero-full" aria-labelledby="hero-heading">
+    <picture class="hero-bg">
+      <source media="(max-width: 700px)" srcset="assets/hero-luxury-sofa-bangalore.webp">
+      <img src="assets/hero-fullscreen-showroom.webp" alt="Premium furniture showroom interior with luxury sectional sofa — Bauhaus Designs Bangalore" width="2199" height="1004" loading="eager" fetchpriority="high">
+    </picture>
+    <div class="hero-shade" aria-hidden="true"></div>
+    <div class="hero-content">
       <p class="eyebrow reveal">Indiranagar · Bengaluru</p>
-      <h1 id="hero-heading" class="reveal d1">Premium furniture<br><em>for Bangalore's</em><br>finest homes</h1>
+      <h1 id="hero-heading" class="reveal d1">Premium furniture for<br>Bangalore's <em>finest homes</em></h1>
       <p class="lede reveal d2">Luxury sofas, recliners and solid-wood dining from Europe's
       quietest ateliers — curated in one showroom on 100 Feet Road.</p>
       <div class="hero-actions reveal d3">
@@ -113,11 +121,7 @@
         <a class="btn btn-ghost" href="collections/">Explore Collections</a>
       </div>
     </div>
-    <figure class="hero-media reveal-img">
-      <img src="assets/hero-luxury-sofa-bangalore.webp" alt="Luxury sectional sofa in a dark, candle-lit premium living room — Bauhaus Designs Bangalore" width="1241" height="1684" loading="eager" fetchpriority="high">
-      <figcaption>The ALTO living collection</figcaption>
-    </figure>
-    <div class="hero-rule" aria-hidden="true"></div>
+    <a class="scroll-cue" href="#collections" aria-label="Scroll to collections"><span></span></a>
   </section>
 
   <!-- ============ TRUST STRIP ============ -->
@@ -375,6 +379,11 @@
   addEventListener('scroll', () => {
     header.classList.toggle('scrolled', scrollY > 24);
   }, { passive: true });
+  const tgl = document.querySelector('.nav-toggle');
+  tgl.addEventListener('click', () => {
+    const open = document.body.classList.toggle('nav-open');
+    tgl.setAttribute('aria-expanded', open);
+  });
 </script>
 </body>
 </html>

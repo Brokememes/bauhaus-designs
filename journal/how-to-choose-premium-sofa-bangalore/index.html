@@ -34,8 +34,10 @@
       <li><a href="../../about/">About</a></li>
       <li><a href="../../journal/">Journal</a></li>
       <li><a href="../../visit/">Visit Showroom</a></li>
+      <li class="nav-phone"><a href="tel:+917019080438">+91 70190 80438</a></li>
     </ul>
     <a class="nav-cta" href="tel:+917019080438">+91 70190 80438</a>
+    <button class="nav-toggle" aria-label="Menu" aria-expanded="false"><span></span><span></span></button>
   </nav>
 </header>
 <main>
@@ -140,6 +142,11 @@ tested: slowly.</p>
   document.querySelectorAll('.reveal, .reveal-img').forEach(el => io.observe(el));
   const hdr = document.querySelector('.site-header');
   addEventListener('scroll', () => hdr.classList.toggle('scrolled', scrollY > 24), { passive: true });
+  const tgl = document.querySelector('.nav-toggle');
+  tgl.addEventListener('click', () => {
+    const open = document.body.classList.toggle('nav-open');
+    tgl.setAttribute('aria-expanded', open);
+  });
 </script>
 </body>
 </html>
