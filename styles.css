@@ -243,7 +243,16 @@ em { font-style: italic; }
 }
 .theme-toggle[aria-checked="true"] .track { background: rgba(46, 81, 60, 0.15); }
 .theme-toggle[aria-checked="true"] .track::after { transform: translateX(18px); background: #2e513c; }
-@media (max-width: 1100px) { .theme-toggle .label { display: none; } }
+@media (max-width: 1100px) { .nav > .theme-toggle .label { display: none; } }
+.nav-theme { display: none; }
+@media (max-width: 860px) {
+  .nav > .theme-toggle { display: none; }
+  .nav-theme { display: block; margin-top: 0.6rem; }
+  .nav-theme .theme-toggle { font-size: 0.8rem; color: var(--ivory); gap: 0.9rem; }
+  .nav-theme .theme-toggle .track { width: 46px; height: 24px; }
+  .nav-theme .theme-toggle .track::after { width: 16px; height: 16px; }
+  .nav-theme .theme-toggle[aria-checked="true"] .track::after { transform: translateX(22px); }
+}
 
 .nav-links { display: flex; gap: 2.2rem; list-style: none; }
 .nav-links a {
@@ -322,6 +331,8 @@ body.nav-open .nav-toggle span:last-child { transform: translateY(-4px) rotate(-
   .nav-links a { font-size: 1.05rem; letter-spacing: 0.26em; }
   .nav-cta { display: none; }
   body.nav-open { overflow: hidden; }
+  /* a backdrop-filter on the header would trap the fixed menu inside the header bar */
+  body.nav-open .site-header { backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 
 /* ---------- fullscreen hero (home) ---------- */
