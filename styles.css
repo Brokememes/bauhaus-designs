@@ -79,6 +79,30 @@
   backdrop-filter: blur(14px);
   border-bottom-color: var(--line);
 }
+/* Heritage signature: forest-green bands with ivory type and sand accents */
+[data-theme="heritage"] :is(.strip, .brands, .cta-band, .site-footer) {
+  --ink: #2e513c;
+  --surface: #2e513c;
+  --surface-2: #375f47;
+  --footer-bg: #24402f;
+  --ivory: #fbfaf7;
+  --ivory-dim: #c9d3c7;
+  --brass: #d9be9d;
+  --brass-soft: #a87845;
+  --on-accent: #20231f;
+  --line: rgba(217, 190, 157, 0.25);
+  --ink-rgb: 46, 81, 60;
+  --ivory-rgb: 251, 250, 247;
+  --brass-rgb: 217, 190, 157;
+  --dim-rgb: 201, 211, 199;
+  color: var(--ivory);
+}
+[data-theme="heritage"] .site-footer .brand-logo .logo-ivory { display: block; }
+[data-theme="heritage"] .site-footer .brand-logo .logo-ink { display: none; }
+[data-theme="heritage"] .nav-cta { background: var(--brass); color: var(--on-accent); border-color: var(--brass); }
+[data-theme="heritage"] .nav-cta:hover { background: #24402f; border-color: #24402f; }
+[data-theme="heritage"] .btn { border-color: var(--brass); }
+[data-theme="heritage"] .btn-solid:hover { background: #24402f; border-color: #24402f; }
 body { transition: background-color 500ms var(--ease-out), color 500ms var(--ease-out); }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
