@@ -1,0 +1,990 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// STM | Smart Structure Mastery (Buy/Sell Signals)
+//
+// Market structure is built ONLY from a Reference Candle Absorption state machine.
+// No ta.pivothigh / ta.pivotlow and no fixed-length highest/lowest look-backs are used
+// for structure. The same engine (f_engine) runs on the chart and, through
+// request.security(), on MTF 1 / MTF 2 / MTF 3 so all four timeframes share one definition.
+//
+//@version=5
+indicator("STM | Smart Structure Mastery (Buy/Sell Signals)", shorttitle = "STM", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 1000)
+
+// =====================================================================================
+// INPUTS
+// =====================================================================================
+G1  = "MULTI TIMEFRAME MTF TREND SETTINGS"
+G2  = "MARKET STRUCTURE SETTINGS"
+G3  = "BUY/SELL SIGNAL SETTINGS"
+G4  = "POSSIBLE BUY/SELL SIGNAL SETTINGS"
+G5  = "RETRACE BUY/SELL SIGNAL SETTINGS"
+G6  = "SUPPLY / DEMAND ZONES"
+G6B = "SUPPLY/DEMAND MTF ZONE"
+G7  = "FAIR VALUE GAP FVG ZONES"
+G7B = "FVG MTF ZONE"
+G8  = "ALERT SETTINGS"
+G9  = "LOT SIZE CALCULATION"
+G10 = "DISPLAY SETTINGS"
+G11 = "HISTORY LIMITS"
+
+// ---- Group 1 : MTF trend
+mtf1 = input.timeframe("3",  "MTF 1", group = G1, tooltip = "Lowest of the three higher timeframes. Should be >= chart timeframe.")
+mtf2 = input.timeframe("5",  "MTF 2", group = G1, tooltip = "Middle higher timeframe.")
+mtf3 = input.timeframe("15", "MTF 3", group = G1, tooltip = "Highest higher timeframe (used by 'Highest MTF + Any 1 Trend Align').")
+
+// ---- Group 2 : Market structure
+retracement_cond = input.string("2 Candle Retracement Method", "Retracement Condition", options = ["Last Reference Candle Absorb", "Retrace confirm after 23.60%", "2 Candle Retracement Method", "Use All Methods"], group = G2, tooltip = "How a retracement (and therefore a confirmed Structure High/Low) is started after the last Reference Candle is absorbed.")
+choch_cond       = input.string("Strong Structure Base", "CHoCH / Fib Condition", options = ["Strong Structure Base", "Last Structure Base"], group = G2, tooltip = "Strong Structure Base: CHoCH only when the last STRONG (>= 50% retracement) swing is closed through. Last Structure Base: CHoCH on the most recent confirmed swing.")
+show_table       = input.bool(true, "Show Market Structure Table", group = G2)
+table_pos        = input.string("Top Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right", "Bottom Center"], group = G2)
+table_size       = input.string("Small", "Table Text Size", options = ["Tiny", "Small", "Large"], group = G2)
+
+// ---- Group 3 : Buy/Sell signal settings
+mtf_trend_mode  = input.string("All 3 MTF Trends Align", "MTF Trend Mode", options = ["All 3 MTF Trends Align", "Highest MTF + Any 1 Trend Align"], group = G3)
+sig_after_choch = input.string("Immediate", "Signal Activation After CHoCH", options = ["Immediate", "After First BOS"], group = G3, tooltip = "After First BOS: no signals are produced in a new trend until at least one BOS confirms it.")
+mtf_zone_mode   = input.string("Supply/Demand", "MTF Zone Filter Mode", options = ["Supply/Demand", "FVG", "Both"], group = G3, tooltip = "Which zone family satisfies the zone filter. Both = price may be inside either a Supply/Demand zone or an FVG.")
+mtf_zone_act    = input.string("Candle Close", "MTF Zone Activation Method", options = ["Candle Close", "Wick Touch"], group = G3, tooltip = "Candle Close: signal candle must CLOSE inside the zone. Wick Touch: candle range only has to intersect the zone.")
+
+// ---- Group 4 : Possible Buy/Sell
+show_poss_sig      = input.bool(true,  "Show Possible Buy/Sell Signals", group = G4)
+use_mtf_zone_poss  = input.bool(false, "Use MTF Zone Filter for Possible Signals", group = G4)
+use_mtf_trend_poss = input.bool(true,  "Use MTF Trend Filter for Possible Signals", group = G4)
+poss_sig_mode      = input.string("Aggressive", "Possible Buy/Sell Signal Mode", options = ["Aggressive", "Precise"], group = G4, tooltip = "Aggressive: a further signal in the same cycle needs a better CLOSE than the previous signal. Precise: it needs a close beyond the previous signal's wick.")
+poss_min_ret       = input.float(60.0, "Possible Buy/Sell Min Retracement %", minval = 0, maxval = 100, group = G4)
+poss_max_ret       = input.float(90.0, "Possible Buy/Sell Max Retracement %", minval = 0, maxval = 100, group = G4)
+max_poss_sigs      = input.int(1, "Max Possible Signals Per Structure Cycle", minval = 1, maxval = 10, group = G4)
+
+// ---- Group 5 : Retrace Buy/Sell
+show_ret_sig      = input.bool(false, "Show Retrace Buy/Sell Signals", group = G5)
+use_mtf_zone_ret  = input.bool(true,  "Use MTF Zone Filter for Retrace Signals", group = G5)
+use_mtf_trend_ret = input.bool(true,  "Use MTF Trend Filter for Retrace Signals", group = G5)
+ret_max_pct       = input.float(40.0, "Retrace Buy/Sell Max Retracement %", minval = 1, maxval = 100, group = G5)
+
+// ---- Group 6 : Supply / Demand
+show_sd         = input.bool(true, "Show Supply/Demand Zones", group = G6)
+sd_confirm_bars = input.int(5, "Zone Confirmation Candles", minval = 1, group = G6, tooltip = "A base candle becomes a zone after this many following candles never trade through its extreme and at least one of them closes beyond its opposite extreme.")
+sd_detect_mode  = input.string("Both Supply/Demand", "Detection Mode", options = ["Both Supply/Demand", "Trend wise Supply/Demand", "Supply Only", "Demand Only"], group = G6)
+sd_to_show      = input.int(5, "Supply/Demand Structures to Show", minval = 1, maxval = 100, group = G6)
+sd_overlap      = input.bool(false, "Allow Overlapping Zones", group = G6)
+sd_delete_break = input.bool(true, "Delete Zone After Break & Close", group = G6)
+sd_chart        = input.bool(false, "Chart Zones", group = G6B, inline = "sdtf")
+sd_mtf1         = input.bool(false, "MTF 1 Zones", group = G6B, inline = "sdtf")
+sd_mtf2         = input.bool(false, "MTF 2 Zones", group = G6B, inline = "sdtf")
+sd_mtf3         = input.bool(true,  "MTF 3 Zones", group = G6B, inline = "sdtf")
+
+// ---- Group 7 : FVG
+show_fvg         = input.bool(false, "Show FVG Zones", group = G7)
+fvg_detect_mode  = input.string("Both FVG", "Detection Mode", options = ["Both FVG", "Trend wise FVG", "Supply FVG Only", "Demand FVG Only"], group = G7)
+fvg_to_show      = input.int(5, "FVG Structures to Show", minval = 1, maxval = 100, group = G7)
+fvg_overlap      = input.bool(false, "Allow Overlapping FVG Zones", group = G7)
+fvg_delete_break = input.bool(true, "Delete FVG After Break & Close", group = G7)
+fvg_chart        = input.bool(false, "Chart Zones", group = G7B, inline = "fvgtf")
+fvg_mtf1         = input.bool(false, "MTF 1 Zones", group = G7B, inline = "fvgtf")
+fvg_mtf2         = input.bool(false, "MTF 2 Zones", group = G7B, inline = "fvgtf")
+fvg_mtf3         = input.bool(true,  "MTF 3 Zones", group = G7B, inline = "fvgtf")
+
+// ---- Group 8 : Alerts
+alert_bos_choch = input.bool(false, "Enable BOS / CHoCH Alerts", group = G8)
+alert_retrace   = input.bool(false, "Enable Retrace Start Alerts", group = G8)
+alert_poss_hl   = input.bool(false, "Enable Possible High/Low Alerts", group = G8)
+alert_poss_sig  = input.bool(true,  "Enable Possible Buy/Sell Signal Alerts", group = G8)
+alert_ret_sig   = input.bool(true,  "Enable Retrace Buy/Sell Signal Alerts", group = G8)
+alert_sd        = input.bool(false, "Enable Supply/Demand Zone Alerts", group = G8)
+alert_fvg       = input.bool(false, "Enable FVG Zone Alerts", group = G8)
+alert_liq       = input.bool(false, "Enable Liquidity Hunt Alerts", group = G8)
+alert_mtf_trend = input.bool(false, "Enable MTF Trend Alignment Alerts", group = G8)
+
+// ---- Group 9 : Lot size
+contract_size = input.float(100.0, "Contract Size Per 1 Lot", minval = 0.0000001, group = G9)
+sl_risk_usd   = input.float(20.0,  "SL Risk in USD", minval = 0, group = G9)
+min_lot       = input.float(0.01,  "Minimum Lot", minval = 0, group = G9)
+max_lot       = input.float(0.1,   "Maximum Lot", minval = 0, group = G9)
+lot_rounding  = input.string("2 Decimal Round Figure", "Dynamic Lot Rounding Method", options = ["2 Decimal Round Figure", "2 Decimal Round Down"], group = G9)
+
+// ---- Group 10 : Display / History
+show_hl_labels    = input.bool(false, "Show HH / HL / LH / LL Labels", group = G10)
+show_poss_labels  = input.bool(true,  "Show Possible High/Low Labels", group = G10)
+show_liq_labels   = input.bool(false, "Show Liquidity Hunt Labels", group = G10)
+show_bos_labels   = input.bool(true,  "Show BOS Labels", group = G10)
+show_choch_labels = input.bool(true,  "Show CHoCH Labels", group = G10)
+show_curr_fib     = input.bool(true,  "Show Current Structure Fibonacci", group = G10)
+show_fib_labels   = input.bool(true,  "Show Fibonacci Labels", group = G10)
+hl_keep           = input.int(100, "HH/HL Labels to Keep", minval = 1, maxval = 500, group = G11)
+bos_keep          = input.int(200, "BOS/CHoCH Drawings to Keep", minval = 1, maxval = 500, group = G11)
+poss_dots_keep    = input.int(100, "Possible High/Low Dots to Keep", minval = 1, maxval = 500, group = G11)
+
+// =====================================================================================
+// COLOURS
+// =====================================================================================
+C_BULL     = #089981
+C_BEAR     = #f23645
+C_NEUTRAL  = #787b86
+C_DEMAND   = color.new(#089981, 85)
+C_SUPPLY   = color.new(#f23645, 85)
+C_BFVG     = color.new(#2962ff, 85)
+C_SFVG     = color.new(#ff9800, 85)
+C_BFVG_BD  = #2962ff
+C_SFVG_BD  = #ff9800
+C_LIQ      = #ffb300
+C_FIB      = #9598a1
+C_POSS     = #e040fb
+
+// =====================================================================================
+// CORE ENGINE  (Reference Candle Absorption state machine + zone detection)
+//   Returns a 42-element tuple. Contains NO drawings so it can be used in request.security().
+//   trend: 1 = bullish, -1 = bearish, 0 = not yet initialised
+// =====================================================================================
+f_engine() =>
+    // ---------- persistent state ----------
+    var int   trend       = 0
+    var bool  inRet       = false     // retracement phase active
+    var float refH        = na        // active Reference Candle high
+    var float refL        = na        // active Reference Candle low
+    var bool  absorbed    = false     // reference candle absorbed against the trend
+    var int   cnt         = 0         // non-inside counter-trend candles since absorption
+    var float legH        = na        // highest high of current bullish impulse
+    var int   legHT       = na
+    var float legL        = na        // lowest low of current bearish impulse
+    var int   legLT       = na
+    var float oppExt      = na        // up: lowest low since legH | down: highest high since legL
+    var int   oppExtT     = na
+    var float sH          = na        // confirmed Structure High
+    var int   sHT         = na
+    var float sL          = na        // confirmed Structure Low
+    var int   sLT         = na
+    var bool  sHValid     = false
+    var bool  sLValid     = false
+    var bool  sHStrong    = true
+    var bool  sLStrong    = true
+    var float strongH     = na        // last STRONG structure high
+    var int   strongHT    = na
+    var float strongL     = na        // last STRONG structure low
+    var int   strongLT    = na
+    var float pbExt       = na        // retracement extreme (up: lowest low / down: highest high)
+    var int   pbExtT      = na
+    var float bRefH       = na        // counter reference candle used for Possible High/Low
+    var float bRefL       = na
+    var bool  possPending = false
+    var float possLvl     = na
+    var int   lastEvt     = 0         // 1 = BOS, 2 = CHoCH
+    var bool  liqHDone    = false
+    var bool  liqLDone    = false
+    var int   bosSince    = 0         // BOS count since last CHoCH
+    var float lastSwH     = na
+    var float lastSwL     = na
+
+    // ---------- per-bar events ----------
+    int   evBos     = 0
+    int   evChoch   = 0
+    float evLvl     = na
+    int   evLvlT    = na
+    float evPct     = na
+    bool  evStrong  = false
+    int   evRet     = 0
+    int   evSw      = 0          // 1 HH, 2 LH, 3 HL, 4 LL
+    float evSwP     = na
+    int   evSwT     = na
+    int   evSwStr   = -1         // 1 strong, 0 weak, -1 n/a
+    int   evLiq     = 0
+    float evLiqLvl  = na
+    int   evLiqT    = na
+    int   evPoss    = 0
+    float evPossLvl = na
+    int   evPossT   = na
+    float evPossPct = na
+    float curPct    = na
+
+    // ---------- zone pre-calculation (called every bar for consistency) ----------
+    int   N       = sd_confirm_bars
+    float loAfter = ta.lowest(low, N)
+    float hiAfter = ta.highest(high, N)
+    float hiClose = ta.highest(close, N)
+    float loClose = ta.lowest(close, N)
+
+    // =========================== STATE MACHINE ===========================
+    if na(refH)
+        refH    := high
+        refL    := low
+        legH    := high
+        legHT   := time
+        legL    := low
+        legLT   := time
+    else if trend == 0
+        // ---- bootstrap: first close outside the first reference candle sets the trend
+        if high > legH
+            legH  := high
+            legHT := time
+        if low < legL
+            legL  := low
+            legLT := time
+        if close > refH
+            trend    := 1
+            sL       := legL
+            sLT      := legLT
+            sLValid  := true
+            sLStrong := true
+            strongL  := legL
+            strongLT := legLT
+            lastSwL  := legL
+            legH     := high
+            legHT    := time
+            oppExt   := low
+            oppExtT  := time
+            refH     := high
+            refL     := low
+            lastEvt  := 2
+        else if close < refL
+            trend    := -1
+            sH       := legH
+            sHT      := legHT
+            sHValid  := true
+            sHStrong := true
+            strongH  := legH
+            strongHT := legHT
+            lastSwH  := legH
+            legL     := low
+            legLT    := time
+            oppExt   := high
+            oppExtT  := time
+            refH     := high
+            refL     := low
+            lastEvt  := 2
+    else if trend == 1
+        // ===================== BULLISH STRUCTURE =====================
+        if inRet
+            if low < pbExt
+                pbExt  := low
+                pbExtT := time
+        else
+            if high > legH
+                legH    := high
+                legHT   := time
+                oppExt  := low
+                oppExtT := time
+            else if low < oppExt
+                oppExt  := low
+                oppExtT := time
+        bool  useStrongL = choch_cond == "Strong Structure Base" and not sLStrong and not na(strongL)
+        float pl  = useStrongL ? strongL  : sL
+        int   plT = useStrongL ? strongLT : sLT
+        if sLValid and close < pl
+            // ---------- Bearish CHoCH ----------
+            evChoch := -1
+            evLvl   := pl
+            evLvlT  := plT
+            if not inRet
+                evSw    := (na(lastSwH) or legH > lastSwH) ? 1 : 2
+                evSwP   := legH
+                evSwT   := legHT
+                lastSwH := legH
+            float loSince  = inRet ? pbExt  : oppExt
+            int   loSinceT = inRet ? pbExtT : oppExtT
+            trend       := -1
+            sH          := legH
+            sHT         := legHT
+            sHValid     := true
+            sHStrong    := true
+            strongH     := legH
+            strongHT    := legHT
+            sLValid     := false
+            legL        := na(loSince) ? low : math.min(loSince, low)
+            legLT       := (na(loSince) or low <= loSince) ? time : loSinceT
+            oppExt      := high
+            oppExtT     := time
+            refH        := high
+            refL        := low
+            absorbed    := false
+            cnt         := 0
+            inRet       := false
+            possPending := false
+            possLvl     := na
+            bosSince    := 0
+            lastEvt     := 2
+            liqHDone    := false
+            liqLDone    := false
+            curPct      := 0.0
+        else if sHValid and close > sH
+            // ---------- Bullish BOS ----------
+            float rngB = sH - sL
+            float pctB = rngB > 0 ? (sH - pbExt) / rngB * 100 : 0.0
+            bool  strB = pctB >= 50
+            evBos    := 1
+            evLvl    := sH
+            evLvlT   := sHT
+            evPct    := pctB
+            evStrong := strB
+            evSw     := (na(lastSwL) or pbExt > lastSwL) ? 3 : 4
+            evSwP    := pbExt
+            evSwT    := pbExtT
+            evSwStr  := strB ? 1 : 0
+            lastSwL  := pbExt
+            sL       := pbExt
+            sLT      := pbExtT
+            sLStrong := strB
+            sLValid  := true
+            if strB
+                strongL  := pbExt
+                strongLT := pbExtT
+            sHValid     := false
+            inRet       := false
+            legH        := high
+            legHT       := time
+            oppExt      := low
+            oppExtT     := time
+            refH        := high
+            refL        := low
+            absorbed    := false
+            cnt         := 0
+            possPending := false
+            possLvl     := na
+            bosSince    += 1
+            lastEvt     := 1
+            liqHDone    := false
+            liqLDone    := false
+            curPct      := 0.0
+        else
+            // ---------- Liquidity hunts (wick through, close back inside) ----------
+            if sHValid and not liqHDone and high > sH and close <= sH
+                evLiq    := 1
+                evLiqLvl := sH
+                evLiqT   := sHT
+                liqHDone := true
+            else if sLValid and not liqLDone and low < pl and close >= pl
+                evLiq    := -1
+                evLiqLvl := pl
+                evLiqT   := plT
+                liqLDone := true
+            if not inRet
+                // ---------- Impulse phase: Reference Candle Absorption ----------
+                if close > refH
+                    refH     := high
+                    refL     := low
+                    absorbed := false
+                    cnt      := 0
+                else
+                    if close < refL
+                        absorbed := true
+                    if absorbed and close < open and low < low[1]
+                        cnt += 1
+                float rngI = legH - sL
+                curPct := rngI > 0 ? (legH - oppExt) / rngI * 100 : 0.0
+                bool c2 = absorbed and cnt >= 2
+                bool c3 = absorbed and curPct >= 23.6
+                bool startRet = retracement_cond == "Last Reference Candle Absorb" ? absorbed : retracement_cond == "2 Candle Retracement Method" ? c2 : retracement_cond == "Retrace confirm after 23.60%" ? c3 : (c2 and c3)
+                if startRet
+                    inRet       := true
+                    sH          := legH
+                    sHT         := legHT
+                    sHValid     := true
+                    liqHDone    := false
+                    pbExt       := oppExt
+                    pbExtT      := oppExtT
+                    bRefH       := high
+                    bRefL       := low
+                    possPending := true
+                    possLvl     := na
+                    evRet       := 1
+                    evSw        := (na(lastSwH) or legH > lastSwH) ? 1 : 2
+                    evSwP       := legH
+                    evSwT       := legHT
+                    lastSwH     := legH
+            else
+                // ---------- Retracement phase: Possible Low tracking ----------
+                if close < bRefL
+                    bRefH       := high
+                    bRefL       := low
+                    possPending := true
+                else if possPending and close > bRefH
+                    possPending := false
+                    bRefH       := high
+                    bRefL       := low
+                    if na(possLvl) or pbExt < possLvl
+                        possLvl   := pbExt
+                        evPoss    := 1
+                        evPossLvl := pbExt
+                        evPossT   := pbExtT
+                        evPossPct := (sH - sL) > 0 ? (sH - pbExt) / (sH - sL) * 100 : 0.0
+                float rngR = sH - sL
+                curPct := rngR > 0 ? (sH - pbExt) / rngR * 100 : 0.0
+    else
+        // ===================== BEARISH STRUCTURE =====================
+        if inRet
+            if high > pbExt
+                pbExt  := high
+                pbExtT := time
+        else
+            if low < legL
+                legL    := low
+                legLT   := time
+                oppExt  := high
+                oppExtT := time
+            else if high > oppExt
+                oppExt  := high
+                oppExtT := time
+        bool  useStrongH = choch_cond == "Strong Structure Base" and not sHStrong and not na(strongH)
+        float ph  = useStrongH ? strongH  : sH
+        int   phT = useStrongH ? strongHT : sHT
+        if sHValid and close > ph
+            // ---------- Bullish CHoCH ----------
+            evChoch := 1
+            evLvl   := ph
+            evLvlT  := phT
+            if not inRet
+                evSw    := (na(lastSwL) or legL < lastSwL) ? 4 : 3
+                evSwP   := legL
+                evSwT   := legLT
+                lastSwL := legL
+            float hiSince  = inRet ? pbExt  : oppExt
+            int   hiSinceT = inRet ? pbExtT : oppExtT
+            trend       := 1
+            sL          := legL
+            sLT         := legLT
+            sLValid     := true
+            sLStrong    := true
+            strongL     := legL
+            strongLT    := legLT
+            sHValid     := false
+            legH        := na(hiSince) ? high : math.max(hiSince, high)
+            legHT       := (na(hiSince) or high >= hiSince) ? time : hiSinceT
+            oppExt      := low
+            oppExtT     := time
+            refH        := high
+            refL        := low
+            absorbed    := false
+            cnt         := 0
+            inRet       := false
+            possPending := false
+            possLvl     := na
+            bosSince    := 0
+            lastEvt     := 2
+            liqHDone    := false
+            liqLDone    := false
+            curPct      := 0.0
+        else if sLValid and close < sL
+            // ---------- Bearish BOS ----------
+            float rngD = sH - sL
+            float pctD = rngD > 0 ? (pbExt - sL) / rngD * 100 : 0.0
+            bool  strD = pctD >= 50
+            evBos    := -1
+            evLvl    := sL
+            evLvlT   := sLT
+            evPct    := pctD
+            evStrong := strD
+            evSw     := (na(lastSwH) or pbExt < lastSwH) ? 2 : 1
+            evSwP    := pbExt
+            evSwT    := pbExtT
+            evSwStr  := strD ? 1 : 0
+            lastSwH  := pbExt
+            sH       := pbExt
+            sHT      := pbExtT
+            sHStrong := strD
+            sHValid  := true
+            if strD
+                strongH  := pbExt
+                strongHT := pbExtT
+            sLValid     := false
+            inRet       := false
+            legL        := low
+            legLT       := time
+            oppExt      := high
+            oppExtT     := time
+            refH        := high
+            refL        := low
+            absorbed    := false
+            cnt         := 0
+            possPending := false
+            possLvl     := na
+            bosSince    += 1
+            lastEvt     := 1
+            liqHDone    := false
+            liqLDone    := false
+            curPct      := 0.0
+        else
+            if sLValid and not liqLDone and low < sL and close >= sL
+                evLiq    := -1
+                evLiqLvl := sL
+                evLiqT   := sLT
+                liqLDone := true
+            else if sHValid and not liqHDone and high > ph and close <= ph
+                evLiq    := 1
+                evLiqLvl := ph
+                evLiqT   := phT
+                liqHDone := true
+            if not inRet
+                if close < refL
+                    refH     := high
+                    refL     := low
+                    absorbed := false
+                    cnt      := 0
+                else
+                    if close > refH
+                        absorbed := true
+                    if absorbed and close > open and high > high[1]
+                        cnt += 1
+                float rngI2 = sH - legL
+                curPct := rngI2 > 0 ? (oppExt - legL) / rngI2 * 100 : 0.0
+                bool d2 = absorbed and cnt >= 2
+                bool d3 = absorbed and curPct >= 23.6
+                bool startRetD = retracement_cond == "Last Reference Candle Absorb" ? absorbed : retracement_cond == "2 Candle Retracement Method" ? d2 : retracement_cond == "Retrace confirm after 23.60%" ? d3 : (d2 and d3)
+                if startRetD
+                    inRet       := true
+                    sL          := legL
+                    sLT         := legLT
+                    sLValid     := true
+                    liqLDone    := false
+                    pbExt       := oppExt
+                    pbExtT      := oppExtT
+                    bRefH       := high
+                    bRefL       := low
+                    possPending := true
+                    possLvl     := na
+                    evRet       := -1
+                    evSw        := (na(lastSwL) or legL < lastSwL) ? 4 : 3
+                    evSwP       := legL
+                    evSwT       := legLT
+                    lastSwL     := legL
+            else
+                // ---------- Retracement phase: Possible High tracking ----------
+                if close > bRefH
+                    bRefH       := high
+                    bRefL       := low
+                    possPending := true
+                else if possPending and close < bRefL
+                    possPending := false
+                    bRefH       := high
+                    bRefL       := low
+                    if na(possLvl) or pbExt > possLvl
+                        possLvl   := pbExt
+                        evPoss    := -1
+                        evPossLvl := pbExt
+                        evPossT   := pbExtT
+                        evPossPct := (sH - sL) > 0 ? (pbExt - sL) / (sH - sL) * 100 : 0.0
+                float rngR2 = sH - sL
+                curPct := rngR2 > 0 ? (pbExt - sL) / rngR2 * 100 : 0.0
+
+    // =========================== ZONE DETECTION ===========================
+    float dzTop = na
+    float dzBot = na
+    int   dzX   = na
+    float szTop = na
+    float szBot = na
+    int   szX   = na
+    float bfTop = na
+    float bfBot = na
+    int   bfX   = na
+    float sfTop = na
+    float sfBot = na
+    int   sfX   = na
+
+    bool wantD = sd_detect_mode == "Both Supply/Demand" or sd_detect_mode == "Demand Only" or (sd_detect_mode == "Trend wise Supply/Demand" and trend == 1)
+    bool wantS = sd_detect_mode == "Both Supply/Demand" or sd_detect_mode == "Supply Only" or (sd_detect_mode == "Trend wise Supply/Demand" and trend == -1)
+    // Demand: base candle N bars ago whose low is never traded through by the next N candles,
+    // and at least one of those N candles closes above the base candle's high (displacement).
+    if wantD and low[N] < loAfter and low[N] <= low[N + 1] and hiClose > high[N]
+        dzBot := low[N]
+        dzTop := math.max(open[N], close[N])
+        if dzTop <= dzBot
+            dzTop := high[N]
+        dzX := time[N]
+    if wantS and high[N] > hiAfter and high[N] >= high[N + 1] and loClose < low[N]
+        szTop := high[N]
+        szBot := math.min(open[N], close[N])
+        if szBot >= szTop
+            szBot := low[N]
+        szX := time[N]
+
+    bool wantBF = fvg_detect_mode == "Both FVG" or fvg_detect_mode == "Demand FVG Only" or (fvg_detect_mode == "Trend wise FVG" and trend == 1)
+    bool wantSF = fvg_detect_mode == "Both FVG" or fvg_detect_mode == "Supply FVG Only" or (fvg_detect_mode == "Trend wise FVG" and trend == -1)
+    if wantBF and low > high[2]
+        bfTop := low
+        bfBot := high[2]
+        bfX   := time[1]
+    if wantSF and high < low[2]
+        sfTop := low[2]
+        sfBot := high
+        sfX   := time[1]
+
+    int   status = trend == 0 ? 0 : inRet ? 3 : lastEvt
+    float fibTop = trend == 1 ? (inRet ? sH : legH) : trend == -1 ? sH : na
+    float fibBot = trend == 1 ? sL : trend == -1 ? (inRet ? sL : legL) : na
+    int   fibT0  = trend == 1 ? sLT : trend == -1 ? sHT : na
+
+    [trend, inRet, status, curPct, sH, sL, sHT, sLT, evBos, evChoch, evLvl, evLvlT, evPct, evStrong, evRet, evSw, evSwP, evSwT, evSwStr, evLiq, evLiqLvl, evLiqT, evPoss, evPossLvl, evPossT, evPossPct, bosSince, fibTop, fibBot, fibT0, dzTop, dzBot, dzX, szTop, szBot, szX, bfTop, bfBot, bfX, sfTop, sfBot, sfX]
+
+// Non-repainting MTF wrapper: values of the last CONFIRMED higher-timeframe bar.
+f_mtf() =>
+    [xTr, xIr, xSt, xRp, xH, xL, xHT, xLT, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19, b20, b21, b22, z1, z2, z3, z4, z5, z6, z7, z8, z9, z10, z11, z12] = f_engine()
+    [xTr[1], xSt[1], xRp[1], xH[1], xL[1], z1[1], z2[1], z3[1], z4[1], z5[1], z6[1], z7[1], z8[1], z9[1], z10[1], z11[1], z12[1]]
+
+// =====================================================================================
+// ENGINE CALLS
+// =====================================================================================
+[cTrend, cInRet, cStatus, cRetPct, cSH, cSL, cSHT, cSLT, eBos, eChoch, eLvl, eLvlT, ePct, eStrong, eRet, eSw, eSwP, eSwT, eSwStr, eLiq, eLiqLvl, eLiqT, ePoss, ePossLvl, ePossT, ePossPct, cBosSince, fTop, fBot, fT0, cDzT, cDzB, cDzX, cSzT, cSzB, cSzX, cBfT, cBfB, cBfX, cSfT, cSfB, cSfX] = f_engine()
+
+[m1Tr, m1St, m1Rp, m1H, m1L, m1DzT, m1DzB, m1DzX, m1SzT, m1SzB, m1SzX, m1BfT, m1BfB, m1BfX, m1SfT, m1SfB, m1SfX] = request.security(syminfo.tickerid, mtf1, f_mtf(), lookahead = barmerge.lookahead_on)
+[m2Tr, m2St, m2Rp, m2H, m2L, m2DzT, m2DzB, m2DzX, m2SzT, m2SzB, m2SzX, m2BfT, m2BfB, m2BfX, m2SfT, m2SfB, m2SfX] = request.security(syminfo.tickerid, mtf2, f_mtf(), lookahead = barmerge.lookahead_on)
+[m3Tr, m3St, m3Rp, m3H, m3L, m3DzT, m3DzB, m3DzX, m3SzT, m3SzB, m3SzX, m3BfT, m3BfB, m3BfX, m3SfT, m3SfB, m3SfX] = request.security(syminfo.tickerid, mtf3, f_mtf(), lookahead = barmerge.lookahead_on)
+
+// =====================================================================================
+// HELPERS
+// =====================================================================================
+f_tfName(string _tf) =>
+    string _t = _tf == "" ? timeframe.period : _tf
+    int _s = timeframe.in_seconds(_t)
+    _s < 60 ? str.tostring(_s) + "s" : _s < 3600 ? str.tostring(_s / 60, "#") + "m" : _s < 86400 ? str.tostring(_s / 3600, "#") + "H" : _t
+
+f_pushLine(array<line> _a, line _l, int _max) =>
+    array.push(_a, _l)
+    if array.size(_a) > _max
+        line.delete(array.shift(_a))
+    array.size(_a)
+
+f_pushLabel(array<label> _a, label _l, int _max) =>
+    array.push(_a, _l)
+    if array.size(_a) > _max
+        label.delete(array.shift(_a))
+    array.size(_a)
+
+// ---------------- Zone object & manager ----------------
+type Zone
+    float  top
+    float  bot
+    int    dir             // 1 = demand / bullish FVG, -1 = supply / bearish FVG
+    string src             // unique source key, e.g. "3-SD"
+    string name            // display name, e.g. "15m Demand"
+    bool   active = true
+    box    bx
+
+f_addZone(array<Zone> _arr, float _top, float _bot, int _dir, string _src, string _name, int _t, bool _overlapOK, int _maxN, bool _draw, color _bg, color _bd) =>
+    bool _ok = not na(_top) and not na(_bot) and _top > _bot
+    if _ok and not _overlapOK
+        for _z in _arr
+            if _z.active and _z.dir == _dir and _z.src == _src and _top >= _z.bot and _bot <= _z.top
+                _ok := false
+    if _ok
+        box _b = _draw ? box.new(_t, _top, time, _bot, xloc = xloc.bar_time, border_color = _bd, bgcolor = _bg, text = _name, text_size = size.tiny, text_color = _bd, text_halign = text.align_right, text_valign = text.align_center) : na
+        array.push(_arr, Zone.new(_top, _bot, _dir, _src, _name, true, _b))
+        int _c = 0
+        for _i = array.size(_arr) - 1 to 0
+            Zone _z = array.get(_arr, _i)
+            if _z.dir == _dir and _z.src == _src
+                _c += 1
+                if _c > _maxN
+                    if not na(_z.bx)
+                        box.delete(_z.bx)
+                    array.remove(_arr, _i)
+    _ok
+
+f_updZones(array<Zone> _arr, bool _delBreak) =>
+    int _n = array.size(_arr)
+    if _n > 0
+        for _i = _n - 1 to 0
+            Zone _z = array.get(_arr, _i)
+            if _z.active
+                bool _brk = _z.dir == 1 ? close < _z.bot : close > _z.top
+                if _brk
+                    if _delBreak
+                        if not na(_z.bx)
+                            box.delete(_z.bx)
+                        array.remove(_arr, _i)
+                    else
+                        _z.active := false
+                        if not na(_z.bx)
+                            box.set_right(_z.bx, time)
+                else if not na(_z.bx)
+                    box.set_right(_z.bx, time)
+    array.size(_arr)
+
+f_ingest(array<Zone> _arr, array<int> _lastTs, int _idx, float _top, float _bot, int _t, int _dir, string _src, string _name, bool _overlapOK, int _maxN, bool _draw, color _bg, color _bd) =>
+    bool _added = false
+    if not na(_top) and not na(_bot) and not na(_t)
+        if _t != array.get(_lastTs, _idx)
+            array.set(_lastTs, _idx, _t)
+            _added := f_addZone(_arr, _top, _bot, _dir, _src, _name, _t, _overlapOK, _maxN, _draw, _bg, _bd)
+    _added
+
+f_findZone(array<Zone> _arr, int _dir, bool _useClose) =>
+    Zone _res = na
+    for _z in _arr
+        if _z.active and _z.dir == _dir and na(_res)
+            bool _in = _useClose ? (close <= _z.top and close >= _z.bot) : (low <= _z.top and high >= _z.bot)
+            if _in
+                _res := _z
+    _res
+
+// =====================================================================================
+// ZONE MANAGEMENT
+// =====================================================================================
+var array<Zone> sdZones  = array.new<Zone>()
+var array<Zone> fvgZones = array.new<Zone>()
+var array<int>  lastZT   = array.new_int(16, 0)
+
+string tfC  = f_tfName("")
+string tfM1 = f_tfName(mtf1)
+string tfM2 = f_tfName(mtf2)
+string tfM3 = f_tfName(mtf3)
+
+f_updZones(sdZones, sd_delete_break)
+f_updZones(fvgZones, fvg_delete_break)
+
+bool newSD  = false
+bool newFVG = false
+if sd_chart
+    newSD := f_ingest(sdZones, lastZT, 0, cDzT, cDzB, cDzX, 1, "C-SD", tfC + " Demand", sd_overlap, sd_to_show, show_sd, C_DEMAND, C_BULL) or newSD
+    newSD := f_ingest(sdZones, lastZT, 1, cSzT, cSzB, cSzX, -1, "C-SD", tfC + " Supply", sd_overlap, sd_to_show, show_sd, C_SUPPLY, C_BEAR) or newSD
+if sd_mtf1
+    newSD := f_ingest(sdZones, lastZT, 4, m1DzT, m1DzB, m1DzX, 1, "1-SD", tfM1 + " Demand", sd_overlap, sd_to_show, show_sd, C_DEMAND, C_BULL) or newSD
+    newSD := f_ingest(sdZones, lastZT, 5, m1SzT, m1SzB, m1SzX, -1, "1-SD", tfM1 + " Supply", sd_overlap, sd_to_show, show_sd, C_SUPPLY, C_BEAR) or newSD
+if sd_mtf2
+    newSD := f_ingest(sdZones, lastZT, 8, m2DzT, m2DzB, m2DzX, 1, "2-SD", tfM2 + " Demand", sd_overlap, sd_to_show, show_sd, C_DEMAND, C_BULL) or newSD
+    newSD := f_ingest(sdZones, lastZT, 9, m2SzT, m2SzB, m2SzX, -1, "2-SD", tfM2 + " Supply", sd_overlap, sd_to_show, show_sd, C_SUPPLY, C_BEAR) or newSD
+if sd_mtf3
+    newSD := f_ingest(sdZones, lastZT, 12, m3DzT, m3DzB, m3DzX, 1, "3-SD", tfM3 + " Demand", sd_overlap, sd_to_show, show_sd, C_DEMAND, C_BULL) or newSD
+    newSD := f_ingest(sdZones, lastZT, 13, m3SzT, m3SzB, m3SzX, -1, "3-SD", tfM3 + " Supply", sd_overlap, sd_to_show, show_sd, C_SUPPLY, C_BEAR) or newSD
+if fvg_chart
+    newFVG := f_ingest(fvgZones, lastZT, 2, cBfT, cBfB, cBfX, 1, "C-FVG", tfC + " Bull FVG", fvg_overlap, fvg_to_show, show_fvg, C_BFVG, C_BFVG_BD) or newFVG
+    newFVG := f_ingest(fvgZones, lastZT, 3, cSfT, cSfB, cSfX, -1, "C-FVG", tfC + " Bear FVG", fvg_overlap, fvg_to_show, show_fvg, C_SFVG, C_SFVG_BD) or newFVG
+if fvg_mtf1
+    newFVG := f_ingest(fvgZones, lastZT, 6, m1BfT, m1BfB, m1BfX, 1, "1-FVG", tfM1 + " Bull FVG", fvg_overlap, fvg_to_show, show_fvg, C_BFVG, C_BFVG_BD) or newFVG
+    newFVG := f_ingest(fvgZones, lastZT, 7, m1SfT, m1SfB, m1SfX, -1, "1-FVG", tfM1 + " Bear FVG", fvg_overlap, fvg_to_show, show_fvg, C_SFVG, C_SFVG_BD) or newFVG
+if fvg_mtf2
+    newFVG := f_ingest(fvgZones, lastZT, 10, m2BfT, m2BfB, m2BfX, 1, "2-FVG", tfM2 + " Bull FVG", fvg_overlap, fvg_to_show, show_fvg, C_BFVG, C_BFVG_BD) or newFVG
+    newFVG := f_ingest(fvgZones, lastZT, 11, m2SfT, m2SfB, m2SfX, -1, "2-FVG", tfM2 + " Bear FVG", fvg_overlap, fvg_to_show, show_fvg, C_SFVG, C_SFVG_BD) or newFVG
+if fvg_mtf3
+    newFVG := f_ingest(fvgZones, lastZT, 14, m3BfT, m3BfB, m3BfX, 1, "3-FVG", tfM3 + " Bull FVG", fvg_overlap, fvg_to_show, show_fvg, C_BFVG, C_BFVG_BD) or newFVG
+    newFVG := f_ingest(fvgZones, lastZT, 15, m3SfT, m3SfB, m3SfX, -1, "3-FVG", tfM3 + " Bear FVG", fvg_overlap, fvg_to_show, show_fvg, C_SFVG, C_SFVG_BD) or newFVG
+
+// =====================================================================================
+// FILTERS
+// =====================================================================================
+f_trendOK(int _dir) =>
+    mtf_trend_mode == "All 3 MTF Trends Align" ? (m1Tr == _dir and m2Tr == _dir and m3Tr == _dir) : (m3Tr == _dir and (m1Tr == _dir or m2Tr == _dir))
+
+f_zoneFor(int _dir) =>
+    bool _useClose = mtf_zone_act == "Candle Close"
+    Zone _z = na
+    if mtf_zone_mode == "Supply/Demand" or mtf_zone_mode == "Both"
+        _z := f_findZone(sdZones, _dir, _useClose)
+    if na(_z) and (mtf_zone_mode == "FVG" or mtf_zone_mode == "Both")
+        _z := f_findZone(fvgZones, _dir, _useClose)
+    _z
+
+f_zoneInfo(Zone _z) =>
+    na(_z) ? "None (structure SL)" : _z.name + " [" + str.tostring(_z.bot, format.mintick) + " - " + str.tostring(_z.top, format.mintick) + "]"
+
+// =====================================================================================
+// LOT SIZE
+//   raw_lot = SL Risk USD / (|Entry - SL| * Contract Size)
+// =====================================================================================
+f_lot(float _entry, float _sl) =>
+    float _dist  = math.abs(_entry - _sl)
+    float _raw   = (na(_dist) or _dist <= 0) ? na : sl_risk_usd / (_dist * contract_size)
+    float _lot   = na(_raw) ? na : lot_rounding == "2 Decimal Round Figure" ? math.round(_raw, 2) : math.floor(_raw * 100) / 100
+    bool  _below = not na(_lot) and _lot < min_lot
+    float _fin   = na(_lot) ? na : _below ? _lot : math.min(_lot, max_lot)
+    [_fin, _below, _raw]
+
+f_signal(int _dir, string _kind, float _sl, float _tp, string _zinfo, float _pct, bool _show) =>
+    [_lot, _below, _raw] = f_lot(close, _sl)
+    string _lotTxt = na(_lot) ? "Lot: n/a" : _below ? "Lot < Min" : "Lot: " + str.tostring(_lot, "#.##")
+    string _tip = _kind + "\nEntry: " + str.tostring(close, format.mintick) + "\nSL Price: " + str.tostring(_sl, format.mintick) + "\nTP (Structure " + (_dir == 1 ? "High" : "Low") + "): " + str.tostring(_tp, format.mintick) + "\nRetracement: " + str.tostring(_pct, "#.0") + "%" + "\nZone: " + _zinfo + "\nRaw Lot: " + str.tostring(_raw, "#.####") + "\n" + _lotTxt
+    label _lb = _show ? label.new(time, _dir == 1 ? low : high, _kind + "\n" + _lotTxt, xloc = xloc.bar_time, yloc = _dir == 1 ? yloc.belowbar : yloc.abovebar, style = _dir == 1 ? label.style_label_up : label.style_label_down, color = _dir == 1 ? C_BULL : C_BEAR, textcolor = color.white, size = size.small, tooltip = _tip) : na
+    [_lb, _tip]
+
+// =====================================================================================
+// STRUCTURE DRAWINGS
+// =====================================================================================
+var array<line>  bosLines  = array.new<line>()
+var array<label> bosLabels = array.new<label>()
+var array<line>  liqLines  = array.new<line>()
+var array<label> liqLabels = array.new<label>()
+var array<label> hlLabels  = array.new<label>()
+var array<label> possDots  = array.new<label>()
+var array<label> sigLabels = array.new<label>()
+var label        possTxt   = na
+
+// ---- BOS ----
+if eBos != 0 and show_bos_labels and not na(eLvlT)
+    color _c = eBos == 1 ? C_BULL : C_BEAR
+    f_pushLine(bosLines, line.new(eLvlT, eLvl, time, eLvl, xloc = xloc.bar_time, color = _c, style = line.style_solid, width = 1), bos_keep)
+    string _t = "BOS (" + (eStrong ? "Strong" : "Weak") + ") - " + str.tostring(ePct, "#.0") + "%"
+    f_pushLabel(bosLabels, label.new(math.round((eLvlT + time) / 2), eLvl, _t, xloc = xloc.bar_time, style = eBos == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _c, size = size.small), bos_keep)
+
+// ---- CHoCH ----
+if eChoch != 0 and show_choch_labels and not na(eLvlT)
+    color _c = eChoch == 1 ? C_BULL : C_BEAR
+    f_pushLine(bosLines, line.new(eLvlT, eLvl, time, eLvl, xloc = xloc.bar_time, color = _c, style = line.style_dashed, width = 1), bos_keep)
+    f_pushLabel(bosLabels, label.new(math.round((eLvlT + time) / 2), eLvl, "CHoCH", xloc = xloc.bar_time, style = eChoch == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _c, size = size.small), bos_keep)
+
+// ---- Liquidity hunts ----
+if eLiq != 0 and show_liq_labels and not na(eLiqT)
+    f_pushLine(liqLines, line.new(eLiqT, eLiqLvl, time, eLiqLvl, xloc = xloc.bar_time, color = C_LIQ, style = line.style_dashed, width = 1), bos_keep)
+    f_pushLabel(liqLabels, label.new(time, eLiqLvl, "Liquidity Hunt", xloc = xloc.bar_time, style = eLiq == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = C_LIQ, size = size.tiny), bos_keep)
+
+// ---- HH / HL / LH / LL ----
+if eSw != 0 and show_hl_labels and not na(eSwT)
+    string _txt = eSw == 1 ? "HH" : eSw == 2 ? "LH" : eSw == 3 ? "HL" : "LL"
+    if eSwStr == 1
+        _txt := _txt + " (Strong)"
+    else if eSwStr == 0
+        _txt := _txt + " (Weak)"
+    bool _isHigh = eSw == 1 or eSw == 2
+    f_pushLabel(hlLabels, label.new(eSwT, eSwP, _txt, xloc = xloc.bar_time, style = _isHigh ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _isHigh ? C_BEAR : C_BULL, size = size.tiny), hl_keep)
+
+// ---- Possible High / Low ----
+if ePoss != 0 and show_poss_labels and not na(ePossT)
+    f_pushLabel(possDots, label.new(ePossT, ePossLvl, "", xloc = xloc.bar_time, style = label.style_circle, color = C_POSS, size = size.tiny), poss_dots_keep)
+    label.delete(possTxt)
+    possTxt := label.new(ePossT, ePossLvl, ePoss == 1 ? "Possible Low (Not Confirmed)" : "Possible High (Not Confirmed)", xloc = xloc.bar_time, style = ePoss == 1 ? label.style_label_up : label.style_label_down, color = color.new(color.black, 100), textcolor = C_POSS, size = size.tiny)
+if eBos != 0 or eChoch != 0
+    label.delete(possTxt)
+    possTxt := na
+
+// =====================================================================================
+// SIGNALS
+// =====================================================================================
+var int   possCnt      = 0
+var float lastSigClose = na
+var float lastSigWick  = na
+if eBos != 0 or eChoch != 0
+    possCnt      := 0
+    lastSigClose := na
+    lastSigWick  := na
+
+bool chochOK = sig_after_choch == "Immediate" or cBosSince >= 1
+
+// ---- Possible Buy / Sell ----
+if ePoss != 0 and ePoss == cTrend
+    int   _dir   = ePoss
+    bool  _pctOK = ePossPct >= poss_min_ret and ePossPct <= poss_max_ret
+    bool  _cntOK = possCnt < max_poss_sigs
+    bool  _modeOK = na(lastSigClose) or (poss_sig_mode == "Aggressive" ? (_dir == 1 ? close < lastSigClose : close > lastSigClose) : (_dir == 1 ? close < lastSigWick : close > lastSigWick))
+    bool  _trOK  = not use_mtf_trend_poss or f_trendOK(_dir)
+    Zone  _z     = f_zoneFor(_dir)
+    bool  _zOK   = not use_mtf_zone_poss or not na(_z)
+    if _pctOK and _cntOK and _modeOK and chochOK and _trOK and _zOK
+        possCnt      += 1
+        lastSigClose := close
+        lastSigWick  := _dir == 1 ? low : high
+        bool  _useZ = use_mtf_zone_poss and not na(_z)
+        float _sl   = _dir == 1 ? (_useZ ? _z.bot : cSL) : (_useZ ? _z.top : cSH)
+        float _tp   = _dir == 1 ? cSH : cSL
+        string _kind = _dir == 1 ? "Possible Buy" : "Possible Sell"
+        [_lb, _tip] = f_signal(_dir, _kind, _sl, _tp, _useZ ? f_zoneInfo(_z) : "Filter off / none", ePossPct, show_poss_sig)
+        if not na(_lb)
+            f_pushLabel(sigLabels, _lb, bos_keep)
+        if alert_poss_sig
+            alert("STM " + _kind + " | " + syminfo.ticker + " " + tfC + "\n" + _tip, alert.freq_once_per_bar_close)
+
+// ---- Retrace Buy / Sell (fires on the bar the retracement starts) ----
+//      eRet == 1  : bullish structure started retracing  -> Retrace SELL
+//      eRet == -1 : bearish structure started retracing  -> Retrace BUY
+if eRet != 0 and cRetPct <= ret_max_pct
+    int  _dir  = -eRet
+    bool _trOK = not use_mtf_trend_ret or f_trendOK(_dir)
+    Zone _z    = f_zoneFor(_dir)
+    bool _zOK  = not use_mtf_zone_ret or not na(_z)
+    if _trOK and _zOK and chochOK
+        bool  _useZ = use_mtf_zone_ret and not na(_z)
+        float _sl   = _dir == 1 ? (_useZ ? _z.bot : cSL) : (_useZ ? _z.top : cSH)
+        float _tp   = _dir == 1 ? cSH : cSL
+        string _kind = _dir == 1 ? "Retrace Buy" : "Retrace Sell"
+        [_lb, _tip] = f_signal(_dir, _kind, _sl, _tp, _useZ ? f_zoneInfo(_z) : "Filter off / none", cRetPct, show_ret_sig)
+        if not na(_lb)
+            f_pushLabel(sigLabels, _lb, bos_keep)
+        if alert_ret_sig
+            alert("STM " + _kind + " | " + syminfo.ticker + " " + tfC + "\n" + _tip, alert.freq_once_per_bar_close)
+
+// =====================================================================================
+// CURRENT STRUCTURE FIBONACCI
+// =====================================================================================
+var array<line>  fibLines = array.new<line>()
+var array<label> fibLbls  = array.new<label>()
+var array<float> fibLvls  = array.from(0.0, 0.236, 0.382, 0.5, 0.618, 0.705, 0.79, 1.0)
+
+if barstate.islast
+    while array.size(fibLines) > 0
+        line.delete(array.pop(fibLines))
+    while array.size(fibLbls) > 0
+        label.delete(array.pop(fibLbls))
+    if show_curr_fib and cTrend != 0 and not na(fTop) and not na(fBot) and not na(fT0) and fTop > fBot
+        float _rng = fTop - fBot
+        for _i = 0 to array.size(fibLvls) - 1
+            float _lv = array.get(fibLvls, _i)
+            float _p  = cTrend == 1 ? fTop - _rng * _lv : fBot + _rng * _lv
+            array.push(fibLines, line.new(fT0, _p, time, _p, xloc = xloc.bar_time, color = color.new(C_FIB, 30), style = line.style_dotted, width = 1))
+            if show_fib_labels
+                array.push(fibLbls, label.new(time, _p, str.tostring(_lv * 100, "#.#") + "% (" + str.tostring(_p, format.mintick) + ")", xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = C_FIB, size = size.tiny))
+
+// =====================================================================================
+// MARKET STRUCTURE TABLE (Chart + MTF 1 + MTF 2 + MTF 3)
+// =====================================================================================
+f_tblPos(string _p) =>
+    switch _p
+        "Top Left"      => position.top_left
+        "Bottom Right"  => position.bottom_right
+        "Bottom Left"   => position.bottom_left
+        "Middle Right"  => position.middle_right
+        "Bottom Center" => position.bottom_center
+        => position.top_right
+
+string tblSize = table_size == "Tiny" ? size.tiny : table_size == "Large" ? size.large : size.small
+var table tbl = table.new(f_tblPos(table_pos), 6, 5, bgcolor = color.new(#131722, 10), frame_color = color.new(C_NEUTRAL, 50), frame_width = 1, border_color = color.new(C_NEUTRAL, 70), border_width = 1)
+
+f_statusTxt(int _tr, int _st) =>
+    _st == 3 ? "Retracement" : _st == 1 ? (_tr == 1 ? "Bullish BOS" : "Bearish BOS") : _st == 2 ? (_tr == 1 ? "Bullish CHoCH" : "Bearish CHoCH") : "-"
+
+f_row(int _r, string _tf, int _tr, int _st, float _rp, float _h, float _l) =>
+    color _tc = _tr == 1 ? C_BULL : _tr == -1 ? C_BEAR : C_NEUTRAL
+    table.cell(tbl, 0, _r, _tf, text_color = color.white, text_size = tblSize)
+    table.cell(tbl, 1, _r, _tr == 1 ? "Bullish" : _tr == -1 ? "Bearish" : "-", text_color = _tc, text_size = tblSize)
+    table.cell(tbl, 2, _r, f_statusTxt(_tr, _st), text_color = _st == 3 ? C_LIQ : _tc, text_size = tblSize)
+    table.cell(tbl, 3, _r, na(_rp) ? "-" : str.tostring(_rp, "#.0") + "%", text_color = color.white, text_size = tblSize)
+    table.cell(tbl, 4, _r, na(_h) ? "-" : str.tostring(_h, format.mintick), text_color = C_BEAR, text_size = tblSize)
+    table.cell(tbl, 5, _r, na(_l) ? "-" : str.tostring(_l, format.mintick), text_color = C_BULL, text_size = tblSize)
+
+if barstate.islast
+    if show_table
+        table.cell(tbl, 0, 0, "TF", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 1, 0, "Trend", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 2, 0, "Status", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 3, 0, "Ret %", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 4, 0, "High Price", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 5, 0, "Low Price", text_color = C_NEUTRAL, text_size = tblSize)
+        f_row(1, "Chart " + tfC, cTrend, cStatus, cRetPct, cSH, cSL)
+        f_row(2, "MTF 1 " + tfM1, m1Tr, m1St, m1Rp, m1H, m1L)
+        f_row(3, "MTF 2 " + tfM2, m2Tr, m2St, m2Rp, m2H, m2L)
+        f_row(4, "MTF 3 " + tfM3, m3Tr, m3St, m3Rp, m3H, m3L)
+    else
+        table.clear(tbl, 0, 0, 5, 4)
+
+// =====================================================================================
+// ALERTS (structure / zones / MTF)
+// =====================================================================================
+if alert_bos_choch and eBos != 0
+    alert("STM " + (eBos == 1 ? "Bullish" : "Bearish") + " BOS (" + (eStrong ? "Strong" : "Weak") + " " + str.tostring(ePct, "#.0") + "%) at " + str.tostring(eLvl, format.mintick) + " | " + syminfo.ticker + " " + tfC, alert.freq_once_per_bar_close)
+if alert_bos_choch and eChoch != 0
+    alert("STM " + (eChoch == 1 ? "Bullish" : "Bearish") + " CHoCH at " + str.tostring(eLvl, format.mintick) + " | " + syminfo.ticker + " " + tfC, alert.freq_once_per_bar_close)
+if alert_retrace and eRet != 0
+    alert("STM Retracement started in " + (eRet == 1 ? "bullish" : "bearish") + " structure (" + str.tostring(cRetPct, "#.0") + "%) | " + syminfo.ticker + " " + tfC, alert.freq_once_per_bar_close)
+if alert_poss_hl and ePoss != 0
+    alert("STM " + (ePoss == 1 ? "Possible Low" : "Possible High") + " (Not Confirmed) at " + str.tostring(ePossLvl, format.mintick) + " | " + syminfo.ticker + " " + tfC, alert.freq_once_per_bar_close)
+if alert_liq and eLiq != 0
+    alert("STM Liquidity Hunt " + (eLiq == 1 ? "above high " : "below low ") + str.tostring(eLiqLvl, format.mintick) + " | " + syminfo.ticker + " " + tfC, alert.freq_once_per_bar_close)
+if alert_sd and newSD
+    alert("STM New Supply/Demand zone | " + syminfo.ticker + " " + tfC, alert.freq_once_per_bar_close)
+if alert_fvg and newFVG
+    alert("STM New FVG zone | " + syminfo.ticker + " " + tfC, alert.freq_once_per_bar_close)
+
+int mtfAlign = (m1Tr == 1 and m2Tr == 1 and m3Tr == 1) ? 1 : (m1Tr == -1 and m2Tr == -1 and m3Tr == -1) ? -1 : 0
+var int prevAlign = 0
+if alert_mtf_trend and mtfAlign != prevAlign and mtfAlign != 0
+    alert("STM All MTF trends aligned " + (mtfAlign == 1 ? "BULLISH" : "BEARISH") + " | " + syminfo.ticker, alert.freq_once_per_bar_close)
+prevAlign := mtfAlign
+
+// =====================================================================================
+// DATA WINDOW
+// =====================================================================================
+plot(cSH,     "Structure High",  color = C_BEAR, display = display.data_window)
+plot(cSL,     "Structure Low",   color = C_BULL, display = display.data_window)
+plot(cRetPct, "Retracement %",   color = C_NEUTRAL, display = display.data_window)
+plot(cTrend,  "Chart Trend",     color = C_NEUTRAL, display = display.data_window)
