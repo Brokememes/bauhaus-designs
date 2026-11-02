@@ -1,0 +1,1353 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// STM | SSM Strategy Tester v1.61
+//
+// Strategy-tester / automation companion of "STM | Smart Structure Mastery (Buy/Sell Signals)".
+// It runs the SAME Reference Candle Absorption structure engine, zones and signal rules as the
+// indicator, and turns the Possible / Retrace Buy/Sell signals into trades with:
+//   - session filter (Asia / London / NY) + close-all at session end
+//   - structure / zone based SL & TP with point buffers and a Max SL rule
+//   - Profit Lock (move SL into profit after X% of the TP distance)
+//   - dynamic (USD-risk) or fixed lot size
+//   - RR plot
+//   - JSON webhook messages for an MT5 bridge (symbol + magic number)
+//
+//@version=5
+strategy("STM | SSM Strategy Tester v1.61", shorttitle = "STM SSM", overlay = true, initial_capital = 10000, currency = currency.USD, default_qty_type = strategy.fixed, default_qty_value = 1, pyramiding = 10, process_orders_on_close = true, calc_on_every_tick = false, margin_long = 0, margin_short = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0, slippage = 0, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 1000)
+
+// =====================================================================================
+// INPUTS
+// =====================================================================================
+G1  = "MULTI TIMEFRAME MTF TREND SETTINGS"
+G2  = "MARKET STRUCTURE SETTINGS"
+G3  = "BUY/SELL SIGNAL SETTINGS"
+G4  = "POSSIBLE BUY/SELL SIGNAL SETTINGS"
+G5  = "RETRACE BUY/SELL SIGNAL SETTINGS"
+G6  = "SUPPLY / DEMAND ZONES"
+G6B = "SUPPLY/DEMAND MTF ZONE"
+G7  = "FAIR VALUE GAP FVG ZONES"
+G7B = "FVG MTF ZONE"
+GS1 = "TRADING SESSIONS - STRATEGY TESTER"
+GS2 = "STRATEGY RISK & EXECUTION SETTINGS"
+GS3 = "STRATEGY RR PLOT SETTINGS"
+GS4 = "TRADING SYMBOL & MAGIC NUMBER - AUTOMATION (WEBHOOK)"
+GS5 = "LOT SIZE MANAGEMENT - AUTOMATION (WEBHOOK)"
+GS6 = "DYNAMIC LOT SIZE SETTINGS - AUTOMATION (WEBHOOK)"
+GS7 = "FIXED LOT SIZE SETTINGS - AUTOMATION (WEBHOOK)"
+GS8 = "DISPLAY & DEBUG SETTINGS - AUTOMATION (WEBHOOK)"
+G10 = "DISPLAY SETTINGS"
+G11 = "HISTORY LIMITS"
+
+
+// ---- Group 1 : MTF trend
+mtf1 = input.timeframe("3",  "MTF 1", group = G1, tooltip = "Lowest of the three higher timeframes. Should be >= chart timeframe.")
+mtf2 = input.timeframe("5",  "MTF 2", group = G1, tooltip = "Middle higher timeframe.")
+mtf3 = input.timeframe("15", "MTF 3", group = G1, tooltip = "Highest higher timeframe (used by 'Highest MTF + Any 1 Trend Align').")
+
+// ---- Group 2 : Market structure
+retracement_cond = input.string("2 Candle Retracement Method", "Retracement Condition", options = ["Last Reference Candle Absorb", "Retrace confirm after 23.60%", "2 Candle Retracement Method", "Use All Methods"], group = G2, tooltip = "How a retracement (and therefore a confirmed Structure High/Low) is started after the last Reference Candle is absorbed.")
+choch_cond       = input.string("Strong Structure Base", "CHoCH / Fib Condition", options = ["Strong Structure Base", "Last Structure Base"], group = G2, tooltip = "Strong Structure Base: CHoCH only when the last STRONG (>= 50% retracement) swing is closed through. Last Structure Base: CHoCH on the most recent confirmed swing.")
+show_table       = input.bool(true, "Show Market Structure Table", group = G2)
+table_pos        = input.string("Top Right", "Table Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right", "Bottom Center"], group = G2)
+table_size       = input.string("Small", "Table Text Size", options = ["Tiny", "Small", "Large"], group = G2)
+
+// ---- Group 3 : Buy/Sell signal settings
+mtf_trend_mode  = input.string("All 3 MTF Trends Align", "MTF Trend Mode", options = ["All 3 MTF Trends Align", "Highest MTF + Any 1 Trend Align"], group = G3)
+sig_after_choch = input.string("Immediate", "Signal Activation After CHoCH", options = ["Immediate", "After First BOS"], group = G3, tooltip = "After First BOS: no signals are produced in a new trend until at least one BOS confirms it.")
+mtf_zone_mode   = input.string("Supply/Demand", "MTF Zone Filter Mode", options = ["Supply/Demand", "FVG", "Both"], group = G3, tooltip = "Which zone family satisfies the zone filter. Both = price may be inside either a Supply/Demand zone or an FVG.")
+mtf_zone_act    = input.string("Candle Close", "MTF Zone Activation Method", options = ["Candle Close", "Wick Touch"], group = G3, tooltip = "Candle Close: signal candle must CLOSE inside the zone. Wick Touch: candle range only has to intersect the zone.")
+
+// ---- Group 4 : Possible Buy/Sell
+show_poss_sig      = input.bool(true,  "Show Possible Buy/Sell Signals", group = G4, tooltip = "Strategy: Possible signals are traded only when this is ON.")
+use_mtf_zone_poss  = input.bool(false, "Use MTF Zone Filter for Possible Signals", group = G4)
+use_mtf_trend_poss = input.bool(true,  "Use MTF Trend Filter for Possible Signals", group = G4)
+poss_sig_mode      = input.string("Aggressive", "Possible Buy/Sell Signal Mode", options = ["Aggressive", "Precise"], group = G4, tooltip = "Aggressive: a further signal in the same cycle needs a better CLOSE than the previous signal. Precise: it needs a close beyond the previous signal's wick.")
+poss_min_ret       = input.float(60.0, "Possible Buy/Sell Min Retracement %", minval = 0, maxval = 100, group = G4)
+poss_max_ret       = input.float(90.0, "Possible Buy/Sell Max Retracement %", minval = 0, maxval = 100, group = G4)
+max_poss_sigs      = input.int(1, "Max Possible Signals Per Structure Cycle", minval = 1, maxval = 10, group = G4)
+
+// ---- Group 5 : Retrace Buy/Sell
+show_ret_sig      = input.bool(false, "Show Retrace Buy/Sell Signals", group = G5, tooltip = "Strategy: Retrace signals are traded only when this is ON.")
+use_mtf_zone_ret  = input.bool(true,  "Use MTF Zone Filter for Retrace Signals", group = G5)
+use_mtf_trend_ret = input.bool(true,  "Use MTF Trend Filter for Retrace Signals", group = G5)
+ret_max_pct       = input.float(40.0, "Retrace Buy/Sell Max Retracement %", minval = 1, maxval = 100, group = G5)
+
+// ---- Group 6 : Supply / Demand
+show_sd         = input.bool(true, "Show Supply/Demand Zones", group = G6)
+sd_confirm_bars = input.int(5, "Zone Confirmation Candles", minval = 1, maxval = 100, group = G6, tooltip = "A base candle becomes a zone after this many following candles never trade through its extreme and at least one of them closes beyond its opposite extreme.")
+sd_detect_mode  = input.string("Both Supply/Demand", "Detection Mode", options = ["Both Supply/Demand", "Trend wise Supply/Demand", "Supply Only", "Demand Only"], group = G6)
+sd_to_show      = input.int(5, "Supply/Demand Structures to Show", minval = 1, maxval = 100, group = G6)
+sd_overlap      = input.bool(false, "Allow Overlapping Zones", group = G6)
+sd_delete_break = input.bool(true, "Delete Zone After Break & Close", group = G6)
+sd_chart        = input.bool(false, "Chart Zones", group = G6B, inline = "sdtf")
+sd_mtf1         = input.bool(false, "MTF 1 Zones", group = G6B, inline = "sdtf")
+sd_mtf2         = input.bool(false, "MTF 2 Zones", group = G6B, inline = "sdtf")
+sd_mtf3         = input.bool(true,  "MTF 3 Zones", group = G6B, inline = "sdtf")
+
+// ---- Group 7 : FVG
+show_fvg         = input.bool(false, "Show FVG Zones", group = G7)
+fvg_detect_mode  = input.string("Both FVG", "Detection Mode", options = ["Both FVG", "Trend wise FVG", "Supply FVG Only", "Demand FVG Only"], group = G7)
+fvg_to_show      = input.int(5, "FVG Structures to Show", minval = 1, maxval = 100, group = G7)
+fvg_overlap      = input.bool(false, "Allow Overlapping FVG Zones", group = G7)
+fvg_delete_break = input.bool(true, "Delete FVG After Break & Close", group = G7)
+fvg_chart        = input.bool(false, "Chart Zones", group = G7B, inline = "fvgtf")
+fvg_mtf1         = input.bool(false, "MTF 1 Zones", group = G7B, inline = "fvgtf")
+fvg_mtf2         = input.bool(false, "MTF 2 Zones", group = G7B, inline = "fvgtf")
+fvg_mtf3         = input.bool(false, "MTF 3 Zones", group = G7B, inline = "fvgtf")
+
+
+// ---- Strategy : Trading sessions
+use_asia          = input.bool(false, "Asia Session", group = GS1)
+asia_tz           = input.string("GMT +5", "Asia Time Zone", options = ["Auto (Exchange)", "Auto (London)", "Auto (New York)", "Auto (Tokyo)", "GMT -5", "GMT -4", "GMT +0", "GMT +1", "GMT +2", "GMT +3", "GMT +4", "GMT +5", "GMT +5:30", "GMT +8", "GMT +9"], group = GS1)
+asia_sess         = input.session("0900-1000", "Asia Trading Session", group = GS1)
+use_london        = input.bool(false, "London Session", group = GS1)
+london_tz         = input.string("Auto (London)", "London Time Zone", options = ["Auto (Exchange)", "Auto (London)", "Auto (New York)", "Auto (Tokyo)", "GMT -5", "GMT -4", "GMT +0", "GMT +1", "GMT +2", "GMT +3", "GMT +4", "GMT +5", "GMT +5:30", "GMT +8", "GMT +9"], group = GS1)
+london_sess       = input.session("0300-0400", "London Trading Session", group = GS1)
+use_ny            = input.bool(true, "NY Session", group = GS1)
+ny_tz             = input.string("Auto (New York)", "NY Time Zone", options = ["Auto (Exchange)", "Auto (London)", "Auto (New York)", "Auto (Tokyo)", "GMT -5", "GMT -4", "GMT +0", "GMT +1", "GMT +2", "GMT +3", "GMT +4", "GMT +5", "GMT +5:30", "GMT +8", "GMT +9"], group = GS1)
+ny_sess           = input.session("0815-1600", "NY Trading Session", group = GS1, tooltip = "08:15-16:00 New York = 17:15-01:00 Pakistan time. Untick all three sessions to trade 24 hours.")
+close_on_sess_end = input.bool(true, "Close All Trades When Trading Session Ends", group = GS1, tooltip = "Closes every open trade on the last candle of the session, so nothing is carried into the overnight / weekend gap.")
+
+// ---- Strategy : Risk & execution
+trade_buys       = input.bool(true, "Trade Buy Signals", group = GS2)
+trade_sells      = input.bool(true, "Trade Sell Signals", group = GS2)
+one_trade        = input.bool(true, "One Trade At A Time", group = GS2, tooltip = "ON: a new signal is ignored while a trade is open. OFF: same-direction signals stack (up to 10). An opposite signal reverses the position because TradingView strategies are netting.")
+point_size       = input.float(0.01, "Point Size", minval = 0.0000001, group = GS2, tooltip = "Price value of 1 point. XAUUSD = 0.01, 5-digit FX = 0.00001.")
+tp_buffer_pts    = input.float(0.0, "TP Buffer Points", minval = 0, group = GS2, tooltip = "TP is placed this many points BEFORE the structure target.")
+sl_buffer_pts    = input.float(0.0, "SL Buffer Points", minval = 0, group = GS2, tooltip = "SL is placed this many points BEYOND the structure / zone stop.")
+max_sl_mode      = input.string("OFF", "Max SL Mode", options = ["OFF", "Skip Trade", "Limit SL"], group = GS2, tooltip = "Skip Trade: ignore signals whose SL is wider than Max SL Points. Limit SL: cap the SL at Max SL Points.")
+max_sl_pts       = input.float(10000.0, "Max SL Points", minval = 1, group = GS2)
+use_profit_lock  = input.bool(true, "Use Profit Lock", group = GS2, tooltip = "When price has travelled 'Trigger %' of the entry-to-TP distance, the SL is moved into profit at 'Move SL to %' of that distance.")
+lock_trigger_pct = input.float(40.0, "Profit Lock Trigger (% of TP Distance)", minval = 1, maxval = 100, group = GS2)
+lock_sl_pct      = input.float(10.0, "Move SL to (% of TP Distance)", minval = 0, maxval = 99, group = GS2)
+
+// ---- Strategy : RR plot
+show_rr_plot  = input.bool(true, "Show RR Plot", group = GS3, tooltip = "Green box = entry to TP, red box = entry to SL (turns blue once the profit lock moves it).")
+show_rr_label = input.bool(true, "Show RR Label", group = GS3)
+rr_keep       = input.int(60, "RR Trades To Keep", minval = 1, maxval = 200, group = GS3)
+
+// ---- Automation : symbol & magic
+trade_symbol = input.string("XAUUSD", "Trading Symbol", group = GS4, tooltip = "Symbol name exactly as it appears in your MT5 Market Watch (it is written into the webhook JSON).")
+magic_base   = input.int(786, "Magic Base (2-3 digits)", minval = 10, maxval = 999, group = GS4, tooltip = "Magic number = Magic Base x 10 + signal type (1 = Possible, 2 = Retrace). 786 -> 7861 / 7862.")
+
+// ---- Automation : lot size
+lot_mode      = input.string("Dynamic Lot Size", "Lot Size Mode", options = ["Dynamic Lot Size", "Fixed Lot Size"], group = GS5)
+contract_size = input.float(100.0, "Contract Size Per 1 Lot", minval = 0.0000001, group = GS5, tooltip = "XAUUSD = 100 oz, standard FX lot = 100000.")
+
+sl_risk_usd      = input.float(50.0, "SL Risk in USD", minval = 0, group = GS6)
+min_lot          = input.float(0.01, "Minimum Lot", minval = 0, group = GS6)
+max_lot          = input.float(0.05, "Maximum Lot", minval = 0, group = GS6)
+lot_rounding     = input.string("2 Decimal Round Figure", "Dynamic Lot Rounding Method", options = ["2 Decimal Round Figure", "2 Decimal Round Down"], group = GS6)
+below_min_action = input.string("Use Minimum Lot", "When Lot < Minimum", options = ["Use Minimum Lot", "Skip Trade"], group = GS6, tooltip = "Use Minimum Lot: trade the minimum lot (risk will be a little above SL Risk). Skip Trade: do not trade that signal.")
+
+fixed_lot = input.float(0.02, "Fixed Lot Size", minval = 0.01, group = GS7, tooltip = "Used only when Lot Size Mode = Fixed Lot Size.")
+
+show_auto_note = input.bool(false, "Show Automation Note", group = GS8)
+
+// ---- Group 10 : Display / History
+show_hl_labels    = input.bool(false, "Show HH / HL / LH / LL Labels", group = G10)
+show_poss_labels  = input.bool(true,  "Show Possible High/Low Labels", group = G10)
+show_liq_labels   = input.bool(false, "Show Liquidity Hunt Labels", group = G10)
+show_bos_labels   = input.bool(true,  "Show BOS Labels", group = G10)
+show_choch_labels = input.bool(true,  "Show CHoCH Labels", group = G10)
+show_curr_fib     = input.bool(true,  "Show Current Structure Fibonacci", group = G10)
+show_fib_labels   = input.bool(true,  "Show Fibonacci Labels", group = G10)
+hl_keep           = input.int(100, "HH/HL Labels to Keep", minval = 1, maxval = 500, group = G11)
+bos_keep          = input.int(200, "BOS/CHoCH Drawings to Keep", minval = 1, maxval = 500, group = G11)
+poss_dots_keep    = input.int(100, "Possible High/Low Dots to Keep", minval = 1, maxval = 500, group = G11)
+
+// =====================================================================================
+// COLOURS
+// =====================================================================================
+C_BULL     = #089981
+C_BEAR     = #f23645
+C_NEUTRAL  = #787b86
+C_DEMAND   = color.new(#089981, 85)
+C_SUPPLY   = color.new(#f23645, 85)
+C_BFVG     = color.new(#2962ff, 85)
+C_SFVG     = color.new(#ff9800, 85)
+C_BFVG_BD  = #2962ff
+C_SFVG_BD  = #ff9800
+C_LIQ      = #ffb300
+C_FIB      = #9598a1
+C_POSS     = #e040fb
+
+// =====================================================================================
+// CORE ENGINE  (Reference Candle Absorption state machine + zone detection)
+//   Returns a 41-element tuple. Contains NO drawings so it can be used in request.security().
+//   trend: 1 = bullish, -1 = bearish, 0 = not yet initialised
+//
+//   Running extremes (bullish wording, bearish is the mirror):
+//     legH   : highest high of the current impulse
+//     oppExt : lowest low since legH                        (impulse phase)
+//     pbExt  : lowest low of the active retracement         (retracement phase)
+//     rb     : highest high since the current oppExt/pbExt  (rebound high)
+//     seg    : lowest low between the previous breakout and the current legH bar
+// =====================================================================================
+f_engine() =>
+    // ---------- persistent state ----------
+    var int   trend       = 0
+    var bool  inRet       = false     // retracement phase active
+    var float refH        = na        // active Reference Candle high
+    var float refL        = na        // active Reference Candle low
+    var bool  absorbed    = false     // reference candle absorbed against the trend
+    var int   cnt         = 0         // non-inside counter-trend candles since absorption
+    var float legH        = na
+    var int   legHT       = na
+    var float legL        = na
+    var int   legLT       = na
+    var float oppExt      = na
+    var int   oppExtT     = na
+    var float rb          = na
+    var int   rbT         = na
+    var float seg         = na
+    var int   segT        = na
+    var float sH          = na        // confirmed Structure High
+    var int   sHT         = na
+    var float sL          = na        // confirmed Structure Low
+    var int   sLT         = na
+    var bool  sHValid     = false
+    var bool  sLValid     = false
+    var bool  sHStrong    = true
+    var bool  sLStrong    = true
+    var float strongH     = na        // last STRONG structure high
+    var int   strongHT    = na
+    var float strongL     = na        // last STRONG structure low
+    var int   strongLT    = na
+    var float pbExt       = na
+    var int   pbExtT      = na
+    var float bRefH       = na        // counter-trend reference candle chain
+    var float bRefL       = na
+    var bool  possPending = false
+    var float possLvl     = na
+    var int   lastEvt     = 0         // 1 = BOS, 2 = CHoCH
+    var bool  liqHDone    = false
+    var bool  liqLDone    = false
+    var int   bosSince    = 0         // BOS count since last CHoCH
+    var float lastSwH     = na
+    var float lastSwL     = na
+
+    // ---------- per-bar events ----------
+    int   evBos     = 0
+    int   evChoch   = 0
+    float evLvl     = na
+    int   evLvlT    = na
+    float evPct     = na
+    bool  evStrong  = false
+    int   evRet     = 0
+    int   evSw      = 0          // 1 HH, 2 LH, 3 HL, 4 LL
+    float evSwP     = na
+    int   evSwT     = na
+    int   evSwStr   = -1         // 1 strong, 0 weak, -1 n/a
+    int   evLiq     = 0
+    float evLiqLvl  = na
+    int   evLiqT    = na
+    int   evPoss    = 0
+    float evPossLvl = na
+    int   evPossT   = na
+    float evPossPct = na
+
+    // ---------- zone pre-calculation (called every bar for consistency) ----------
+    int   N       = sd_confirm_bars
+    float loAfter = ta.lowest(low, N)
+    float hiAfter = ta.highest(high, N)
+    float hiClose = ta.highest(close, N)
+    float loClose = ta.lowest(close, N)
+
+    // =========================== STATE MACHINE ===========================
+    if na(refH)
+        refH  := high
+        refL  := low
+        legH  := high
+        legHT := time
+        legL  := low
+        legLT := time
+    else if trend == 0
+        // ---- bootstrap: first close outside the first reference candle sets the trend
+        if high > legH
+            legH  := high
+            legHT := time
+        if low < legL
+            legL  := low
+            legLT := time
+        if close > refH
+            trend    := 1
+            sL       := legL
+            sLT      := legLT
+            sLValid  := true
+            sLStrong := true
+            strongL  := legL
+            strongLT := legLT
+            lastSwL  := legL
+            oppExt   := low
+            oppExtT  := time
+            rb       := high
+            rbT      := time
+            seg      := legL
+            segT     := legLT
+            refH     := high
+            refL     := low
+            lastEvt  := 2
+        else if close < refL
+            trend    := -1
+            sH       := legH
+            sHT      := legHT
+            sHValid  := true
+            sHStrong := true
+            strongH  := legH
+            strongHT := legHT
+            lastSwH  := legH
+            oppExt   := high
+            oppExtT  := time
+            rb       := low
+            rbT      := time
+            seg      := legH
+            segT     := legHT
+            refH     := high
+            refL     := low
+            lastEvt  := 2
+    else if trend == 1
+        // ===================== BULLISH STRUCTURE =====================
+        // 1) running extremes (include this bar)
+        if inRet
+            if low < pbExt
+                pbExt  := low
+                pbExtT := time
+                rb     := high
+                rbT    := time
+            else if high > rb
+                rb  := high
+                rbT := time
+        else
+            if high > legH
+                // every low up to the new top belongs to the leg that started at the breakout
+                if oppExt < seg
+                    seg  := oppExt
+                    segT := oppExtT
+                if low < seg
+                    seg  := low
+                    segT := time
+                legH    := high
+                legHT   := time
+                oppExt  := low
+                oppExtT := time
+                rb      := high
+                rbT     := time
+            else if low < oppExt
+                oppExt  := low
+                oppExtT := time
+                rb      := high
+                rbT     := time
+            else if high > rb
+                rb  := high
+                rbT := time
+        // 2) protected low for CHoCH (CHoCH / Fib Condition)
+        bool  useStrongL = choch_cond == "Strong Structure Base" and not sLStrong and not na(strongL)
+        float pl  = useStrongL ? strongL  : sL
+        int   plT = useStrongL ? strongLT : sLT
+        if sLValid and close < pl
+            // ---------- Bearish CHoCH ----------
+            evChoch := -1
+            evLvl   := pl
+            evLvlT  := plT
+            if not inRet
+                evSw    := (na(lastSwH) or legH > lastSwH) ? 1 : 2
+                evSwP   := legH
+                evSwT   := legHT
+                lastSwH := legH
+            float loNow  = inRet ? pbExt  : oppExt
+            int   loNowT = inRet ? pbExtT : oppExtT
+            trend       := -1
+            sH          := legH
+            sHT         := legHT
+            sHValid     := true
+            sHStrong    := true
+            strongH     := legH
+            strongHT    := legHT
+            sLValid     := false
+            legL        := loNow
+            legLT       := loNowT
+            oppExt      := rb
+            oppExtT     := rbT
+            rb          := low
+            rbT         := time
+            seg         := legH
+            segT        := legHT
+            refH        := high
+            refL        := low
+            absorbed    := false
+            cnt         := 0
+            inRet       := false
+            possPending := false
+            possLvl     := na
+            bosSince    := 0
+            lastEvt     := 2
+            liqHDone    := false
+            liqLDone    := false
+        else if sHValid and close > sH
+            // ---------- Bullish BOS ----------
+            float rngB = sH - sL
+            float pctB = rngB > 0 ? (sH - pbExt) / rngB * 100 : 0.0
+            bool  strB = pctB >= 50
+            evBos    := 1
+            evLvl    := sH
+            evLvlT   := sHT
+            evPct    := pctB
+            evStrong := strB
+            evSw     := (na(lastSwL) or pbExt > lastSwL) ? 3 : 4
+            evSwP    := pbExt
+            evSwT    := pbExtT
+            evSwStr  := strB ? 1 : 0
+            lastSwL  := pbExt
+            sL       := pbExt
+            sLT      := pbExtT
+            sLStrong := strB
+            sLValid  := true
+            if strB
+                strongL  := pbExt
+                strongLT := pbExtT
+            sHValid     := false
+            inRet       := false
+            legH        := rb
+            legHT       := rbT
+            oppExt      := low
+            oppExtT     := time
+            rb          := high
+            rbT         := time
+            seg         := pbExt
+            segT        := pbExtT
+            refH        := high
+            refL        := low
+            absorbed    := false
+            cnt         := 0
+            possPending := false
+            possLvl     := na
+            bosSince    += 1
+            lastEvt     := 1
+            liqHDone    := false
+            liqLDone    := false
+        else
+            // ---------- Liquidity hunts (wick through, close back inside) ----------
+            if sHValid and not liqHDone and high > sH and close <= sH
+                evLiq    := 1
+                evLiqLvl := sH
+                evLiqT   := sHT
+                liqHDone := true
+            else if sLValid and not liqLDone and low < sL and close >= sL
+                evLiq    := -1
+                evLiqLvl := sL
+                evLiqT   := sLT
+                liqLDone := true
+            if not inRet
+                // ---------- Impulse phase: Reference Candle Absorption ----------
+                if close > refH
+                    // new bullish Reference Candle
+                    refH     := high
+                    refL     := low
+                    absorbed := false
+                    cnt      := 0
+                else if not absorbed
+                    if close < refL
+                        // reference candle absorbed: 1st non-inside bearish candle
+                        absorbed := true
+                        cnt      := 1
+                        bRefH    := high
+                        bRefL    := low
+                else if close < bRefL
+                    // next non-inside bearish candle (closes below the previous one)
+                    cnt   += 1
+                    bRefH := high
+                    bRefL := low
+                float rngI = legH - sL
+                float pctI = rngI > 0 ? (legH - oppExt) / rngI * 100 : 0.0
+                bool  c2   = absorbed and cnt >= 2
+                bool  c3   = absorbed and pctI >= 23.6
+                bool  startRet = retracement_cond == "Last Reference Candle Absorb" ? absorbed : retracement_cond == "2 Candle Retracement Method" ? c2 : retracement_cond == "Retrace confirm after 23.60%" ? c3 : (c2 and c3)
+                if startRet
+                    inRet    := true
+                    sH       := legH
+                    sHT      := legHT
+                    sHValid  := true
+                    liqHDone := false
+                    // lock Structure Low = lowest point between previous breakout and Structure High
+                    if not na(seg) and seg < sL
+                        sL       := seg
+                        sLT      := segT
+                        liqLDone := false
+                        if sLStrong
+                            strongL  := seg
+                            strongLT := segT
+                    pbExt       := oppExt
+                    pbExtT      := oppExtT
+                    possPending := true
+                    possLvl     := na
+                    evRet       := 1
+                    evSw        := (na(lastSwH) or legH > lastSwH) ? 1 : 2
+                    evSwP       := legH
+                    evSwT       := legHT
+                    lastSwH     := legH
+            else
+                // ---------- Retracement phase: Possible Low tracking ----------
+                if possPending
+                    if close < bRefL
+                        bRefH := high
+                        bRefL := low
+                    else if close > bRefH
+                        possPending := false
+                        possLvl     := pbExt
+                        evPoss      := 1
+                        evPossLvl   := pbExt
+                        evPossT     := pbExtT
+                        evPossPct   := (sH - pl) > 0 ? (sH - pbExt) / (sH - pl) * 100 : 0.0
+                else if not na(possLvl) and low < possLvl
+                    // price dropped below the last Possible Low: re-arm on this candle
+                    possPending := true
+                    bRefH       := high
+                    bRefL       := low
+    else
+        // ===================== BEARISH STRUCTURE =====================
+        if inRet
+            if high > pbExt
+                pbExt  := high
+                pbExtT := time
+                rb     := low
+                rbT    := time
+            else if low < rb
+                rb  := low
+                rbT := time
+        else
+            if low < legL
+                if oppExt > seg
+                    seg  := oppExt
+                    segT := oppExtT
+                if high > seg
+                    seg  := high
+                    segT := time
+                legL    := low
+                legLT   := time
+                oppExt  := high
+                oppExtT := time
+                rb      := low
+                rbT     := time
+            else if high > oppExt
+                oppExt  := high
+                oppExtT := time
+                rb      := low
+                rbT     := time
+            else if low < rb
+                rb  := low
+                rbT := time
+        bool  useStrongH = choch_cond == "Strong Structure Base" and not sHStrong and not na(strongH)
+        float ph  = useStrongH ? strongH  : sH
+        int   phT = useStrongH ? strongHT : sHT
+        if sHValid and close > ph
+            // ---------- Bullish CHoCH ----------
+            evChoch := 1
+            evLvl   := ph
+            evLvlT  := phT
+            if not inRet
+                evSw    := (na(lastSwL) or legL < lastSwL) ? 4 : 3
+                evSwP   := legL
+                evSwT   := legLT
+                lastSwL := legL
+            float hiNow  = inRet ? pbExt  : oppExt
+            int   hiNowT = inRet ? pbExtT : oppExtT
+            trend       := 1
+            sL          := legL
+            sLT         := legLT
+            sLValid     := true
+            sLStrong    := true
+            strongL     := legL
+            strongLT    := legLT
+            sHValid     := false
+            legH        := hiNow
+            legHT       := hiNowT
+            oppExt      := rb
+            oppExtT     := rbT
+            rb          := high
+            rbT         := time
+            seg         := legL
+            segT        := legLT
+            refH        := high
+            refL        := low
+            absorbed    := false
+            cnt         := 0
+            inRet       := false
+            possPending := false
+            possLvl     := na
+            bosSince    := 0
+            lastEvt     := 2
+            liqHDone    := false
+            liqLDone    := false
+        else if sLValid and close < sL
+            // ---------- Bearish BOS ----------
+            float rngD = sH - sL
+            float pctD = rngD > 0 ? (pbExt - sL) / rngD * 100 : 0.0
+            bool  strD = pctD >= 50
+            evBos    := -1
+            evLvl    := sL
+            evLvlT   := sLT
+            evPct    := pctD
+            evStrong := strD
+            evSw     := (na(lastSwH) or pbExt < lastSwH) ? 2 : 1
+            evSwP    := pbExt
+            evSwT    := pbExtT
+            evSwStr  := strD ? 1 : 0
+            lastSwH  := pbExt
+            sH       := pbExt
+            sHT      := pbExtT
+            sHStrong := strD
+            sHValid  := true
+            if strD
+                strongH  := pbExt
+                strongHT := pbExtT
+            sLValid     := false
+            inRet       := false
+            legL        := rb
+            legLT       := rbT
+            oppExt      := high
+            oppExtT     := time
+            rb          := low
+            rbT         := time
+            seg         := pbExt
+            segT        := pbExtT
+            refH        := high
+            refL        := low
+            absorbed    := false
+            cnt         := 0
+            possPending := false
+            possLvl     := na
+            bosSince    += 1
+            lastEvt     := 1
+            liqHDone    := false
+            liqLDone    := false
+        else
+            if sLValid and not liqLDone and low < sL and close >= sL
+                evLiq    := -1
+                evLiqLvl := sL
+                evLiqT   := sLT
+                liqLDone := true
+            else if sHValid and not liqHDone and high > sH and close <= sH
+                evLiq    := 1
+                evLiqLvl := sH
+                evLiqT   := sHT
+                liqHDone := true
+            if not inRet
+                if close < refL
+                    // new bearish Reference Candle
+                    refH     := high
+                    refL     := low
+                    absorbed := false
+                    cnt      := 0
+                else if not absorbed
+                    if close > refH
+                        absorbed := true
+                        cnt      := 1
+                        bRefH    := high
+                        bRefL    := low
+                else if close > bRefH
+                    cnt   += 1
+                    bRefH := high
+                    bRefL := low
+                float rngI2 = sH - legL
+                float pctI2 = rngI2 > 0 ? (oppExt - legL) / rngI2 * 100 : 0.0
+                bool  d2    = absorbed and cnt >= 2
+                bool  d3    = absorbed and pctI2 >= 23.6
+                bool  startRetD = retracement_cond == "Last Reference Candle Absorb" ? absorbed : retracement_cond == "2 Candle Retracement Method" ? d2 : retracement_cond == "Retrace confirm after 23.60%" ? d3 : (d2 and d3)
+                if startRetD
+                    inRet    := true
+                    sL       := legL
+                    sLT      := legLT
+                    sLValid  := true
+                    liqLDone := false
+                    // lock Structure High = highest point between previous breakout and Structure Low
+                    if not na(seg) and seg > sH
+                        sH       := seg
+                        sHT      := segT
+                        liqHDone := false
+                        if sHStrong
+                            strongH  := seg
+                            strongHT := segT
+                    pbExt       := oppExt
+                    pbExtT      := oppExtT
+                    possPending := true
+                    possLvl     := na
+                    evRet       := -1
+                    evSw        := (na(lastSwL) or legL < lastSwL) ? 4 : 3
+                    evSwP       := legL
+                    evSwT       := legLT
+                    lastSwL     := legL
+            else
+                // ---------- Retracement phase: Possible High tracking ----------
+                if possPending
+                    if close > bRefH
+                        bRefH := high
+                        bRefL := low
+                    else if close < bRefL
+                        possPending := false
+                        possLvl     := pbExt
+                        evPoss      := -1
+                        evPossLvl   := pbExt
+                        evPossT     := pbExtT
+                        evPossPct   := (ph - sL) > 0 ? (pbExt - sL) / (ph - sL) * 100 : 0.0
+                else if not na(possLvl) and high > possLvl
+                    possPending := true
+                    bRefH       := high
+                    bRefL       := low
+
+    // =========================== OUTPUTS FROM FINAL STATE ===========================
+    //   curPct : pullback % of the current leg vs. the LAST structure base (BOS strength, retrace signals)
+    //   fibPct : pullback % vs. the CHoCH / Fib Condition base (Fibonacci, Possible signals, table)
+    float curPct = na
+    float fibPct = na
+    float outH   = na
+    float outL   = na
+    float fibTop = na
+    float fibBot = na
+    int   fibT0  = na
+    if trend == 1
+        bool  uStrong = choch_cond == "Strong Structure Base" and not sLStrong and not na(strongL)
+        float uBase   = uStrong ? strongL  : sL
+        int   uBaseT  = uStrong ? strongLT : sLT
+        float uTop    = inRet ? sH : legH
+        float uLow    = inRet ? pbExt : oppExt
+        outH   := uTop
+        outL   := sL
+        curPct := (uTop - sL) > 0 ? (uTop - uLow) / (uTop - sL) * 100 : 0.0
+        fibPct := (uTop - uBase) > 0 ? (uTop - uLow) / (uTop - uBase) * 100 : 0.0
+        fibTop := uTop
+        fibBot := uBase
+        fibT0  := uBaseT
+    else if trend == -1
+        bool  dStrong = choch_cond == "Strong Structure Base" and not sHStrong and not na(strongH)
+        float dBase   = dStrong ? strongH  : sH
+        int   dBaseT  = dStrong ? strongHT : sHT
+        float dBot    = inRet ? sL : legL
+        float dHigh   = inRet ? pbExt : oppExt
+        outH   := sH
+        outL   := dBot
+        curPct := (sH - dBot) > 0 ? (dHigh - dBot) / (sH - dBot) * 100 : 0.0
+        fibPct := (dBase - dBot) > 0 ? (dHigh - dBot) / (dBase - dBot) * 100 : 0.0
+        fibTop := dBase
+        fibBot := dBot
+        fibT0  := dBaseT
+
+    // =========================== ZONE DETECTION ===========================
+    float dzTop = na
+    float dzBot = na
+    int   dzX   = na
+    float szTop = na
+    float szBot = na
+    int   szX   = na
+    float bfTop = na
+    float bfBot = na
+    int   bfX   = na
+    float sfTop = na
+    float sfBot = na
+    int   sfX   = na
+
+    bool wantD = sd_detect_mode == "Both Supply/Demand" or sd_detect_mode == "Demand Only" or (sd_detect_mode == "Trend wise Supply/Demand" and trend == 1)
+    bool wantS = sd_detect_mode == "Both Supply/Demand" or sd_detect_mode == "Supply Only" or (sd_detect_mode == "Trend wise Supply/Demand" and trend == -1)
+    // Demand: base candle N bars ago whose low is never traded through by the next N candles,
+    // and at least one of those N candles closes above the base candle's high (displacement).
+    if wantD and low[N] < loAfter and low[N] <= low[N + 1] and hiClose > high[N]
+        dzBot := low[N]
+        dzTop := math.max(open[N], close[N])
+        if dzTop <= dzBot
+            dzTop := high[N]
+        dzX := time[N]
+    if wantS and high[N] > hiAfter and high[N] >= high[N + 1] and loClose < low[N]
+        szTop := high[N]
+        szBot := math.min(open[N], close[N])
+        if szBot >= szTop
+            szBot := low[N]
+        szX := time[N]
+
+    bool wantBF = fvg_detect_mode == "Both FVG" or fvg_detect_mode == "Demand FVG Only" or (fvg_detect_mode == "Trend wise FVG" and trend == 1)
+    bool wantSF = fvg_detect_mode == "Both FVG" or fvg_detect_mode == "Supply FVG Only" or (fvg_detect_mode == "Trend wise FVG" and trend == -1)
+    if wantBF and low > high[2]
+        bfTop := low
+        bfBot := high[2]
+        bfX   := time[2]
+    if wantSF and high < low[2]
+        sfTop := low[2]
+        sfBot := high
+        sfX   := time[2]
+
+    int status = trend == 0 ? 0 : inRet ? 3 : lastEvt
+
+    [trend, inRet, status, curPct, fibPct, outH, outL, evBos, evChoch, evLvl, evLvlT, evPct, evStrong, evRet, evSw, evSwP, evSwT, evSwStr, evLiq, evLiqLvl, evLiqT, evPoss, evPossLvl, evPossT, evPossPct, bosSince, fibTop, fibBot, fibT0, dzTop, dzBot, dzX, szTop, szBot, szX, bfTop, bfBot, bfX, sfTop, sfBot, sfX]
+
+// Non-repainting MTF wrapper: values of the last CONFIRMED higher-timeframe bar.
+f_mtf() =>
+    [xTr, xIr, xSt, xCp, xFp, xH, xL, k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11, k12, k13, k14, k15, k16, k17, k18, k19, k20, k21, k22, z1, z2, z3, z4, z5, z6, z7, z8, z9, z10, z11, z12] = f_engine()
+    [xTr[1], xSt[1], xFp[1], xH[1], xL[1], z1[1], z2[1], z3[1], z4[1], z5[1], z6[1], z7[1], z8[1], z9[1], z10[1], z11[1], z12[1]]
+
+// =====================================================================================
+// ENGINE CALLS
+// =====================================================================================
+[cTrend, cInRet, cStatus, cRetPct, cFibPct, cSH, cSL, eBos, eChoch, eLvl, eLvlT, ePct, eStrong, eRet, eSw, eSwP, eSwT, eSwStr, eLiq, eLiqLvl, eLiqT, ePoss, ePossLvl, ePossT, ePossPct, cBosSince, fTop, fBot, fT0, cDzT, cDzB, cDzX, cSzT, cSzB, cSzX, cBfT, cBfB, cBfX, cSfT, cSfB, cSfX] = f_engine()
+
+[m1Tr, m1St, m1Rp, m1H, m1L, m1DzT, m1DzB, m1DzX, m1SzT, m1SzB, m1SzX, m1BfT, m1BfB, m1BfX, m1SfT, m1SfB, m1SfX] = request.security(syminfo.tickerid, mtf1, f_mtf(), lookahead = barmerge.lookahead_on)
+[m2Tr, m2St, m2Rp, m2H, m2L, m2DzT, m2DzB, m2DzX, m2SzT, m2SzB, m2SzX, m2BfT, m2BfB, m2BfX, m2SfT, m2SfB, m2SfX] = request.security(syminfo.tickerid, mtf2, f_mtf(), lookahead = barmerge.lookahead_on)
+[m3Tr, m3St, m3Rp, m3H, m3L, m3DzT, m3DzB, m3DzX, m3SzT, m3SzB, m3SzX, m3BfT, m3BfB, m3BfX, m3SfT, m3SfB, m3SfX] = request.security(syminfo.tickerid, mtf3, f_mtf(), lookahead = barmerge.lookahead_on)
+
+// =====================================================================================
+// HELPERS
+// =====================================================================================
+f_tfName(string _tf) =>
+    string _t = _tf == "" ? timeframe.period : _tf
+    int _s = timeframe.in_seconds(_t)
+    _s < 60 ? str.tostring(_s) + "s" : _s < 3600 ? str.tostring(_s / 60.0, "#.##") + "m" : _s < 86400 ? str.tostring(_s / 3600.0, "#.##") + "H" : _t
+
+f_pushLine(array<line> _a, line _l, int _max) =>
+    array.push(_a, _l)
+    if array.size(_a) > _max
+        line.delete(array.shift(_a))
+    array.size(_a)
+
+f_pushLabel(array<label> _a, label _l, int _max) =>
+    array.push(_a, _l)
+    if array.size(_a) > _max
+        label.delete(array.shift(_a))
+    array.size(_a)
+
+// ---------------- Zone object & manager ----------------
+type Zone
+    float  top
+    float  bot
+    int    dir             // 1 = demand / bullish FVG, -1 = supply / bearish FVG
+    string src             // unique source key, e.g. "3-SD"
+    string name            // display name, e.g. "15m Demand"
+    bool   active = true
+    box    bx
+
+f_addZone(array<Zone> _arr, float _top, float _bot, int _dir, string _src, string _name, int _t, bool _overlapOK, int _maxN, bool _draw, color _bg, color _bd) =>
+    bool _ok = not na(_top) and not na(_bot) and _top > _bot
+    if _ok and not _overlapOK
+        for _z in _arr
+            if _z.active and _z.dir == _dir and _z.src == _src and _top >= _z.bot and _bot <= _z.top
+                _ok := false
+    if _ok
+        box _b = _draw ? box.new(_t, _top, time, _bot, xloc = xloc.bar_time, border_color = _bd, bgcolor = _bg, text = _name, text_size = size.tiny, text_color = _bd, text_halign = text.align_right, text_valign = text.align_center) : na
+        array.push(_arr, Zone.new(_top, _bot, _dir, _src, _name, true, _b))
+        int _c = 0
+        for _i = array.size(_arr) - 1 to 0
+            Zone _z = array.get(_arr, _i)
+            if _z.dir == _dir and _z.src == _src
+                _c += 1
+                if _c > _maxN
+                    if not na(_z.bx)
+                        box.delete(_z.bx)
+                    array.remove(_arr, _i)
+    _ok
+
+f_updZones(array<Zone> _arr, bool _delBreak) =>
+    int _n = array.size(_arr)
+    if _n > 0
+        for _i = _n - 1 to 0
+            Zone _z = array.get(_arr, _i)
+            if _z.active
+                bool _brk = _z.dir == 1 ? close < _z.bot : close > _z.top
+                if _brk
+                    if _delBreak
+                        if not na(_z.bx)
+                            box.delete(_z.bx)
+                        array.remove(_arr, _i)
+                    else
+                        _z.active := false
+                        if not na(_z.bx)
+                            box.set_right(_z.bx, time)
+                else if not na(_z.bx)
+                    box.set_right(_z.bx, time)
+    array.size(_arr)
+
+f_ingest(array<Zone> _arr, array<int> _lastTs, int _idx, float _top, float _bot, int _t, int _dir, string _src, string _name, bool _overlapOK, int _maxN, bool _draw, color _bg, color _bd) =>
+    bool _added = false
+    if not na(_top) and not na(_bot) and not na(_t)
+        if _t != array.get(_lastTs, _idx)
+            array.set(_lastTs, _idx, _t)
+            _added := f_addZone(_arr, _top, _bot, _dir, _src, _name, _t, _overlapOK, _maxN, _draw, _bg, _bd)
+    _added
+
+f_findZone(array<Zone> _arr, int _dir, bool _useClose) =>
+    Zone _res = na
+    for _z in _arr
+        if _z.active and _z.dir == _dir and na(_res)
+            bool _in = _useClose ? (close <= _z.top and close >= _z.bot) : (low <= _z.top and high >= _z.bot)
+            if _in
+                _res := _z
+    _res
+
+// =====================================================================================
+// ZONE MANAGEMENT
+// =====================================================================================
+var array<Zone> sdZones  = array.new<Zone>()
+var array<Zone> fvgZones = array.new<Zone>()
+var array<int>  lastZT   = array.new_int(16, 0)
+
+string tfC  = f_tfName("")
+string tfM1 = f_tfName(mtf1)
+string tfM2 = f_tfName(mtf2)
+string tfM3 = f_tfName(mtf3)
+
+f_updZones(sdZones, sd_delete_break)
+f_updZones(fvgZones, fvg_delete_break)
+
+bool newSD  = false
+bool newFVG = false
+if sd_chart
+    newSD := f_ingest(sdZones, lastZT, 0, cDzT, cDzB, cDzX, 1, "C-SD", tfC + " Demand", sd_overlap, sd_to_show, show_sd, C_DEMAND, C_BULL) or newSD
+    newSD := f_ingest(sdZones, lastZT, 1, cSzT, cSzB, cSzX, -1, "C-SD", tfC + " Supply", sd_overlap, sd_to_show, show_sd, C_SUPPLY, C_BEAR) or newSD
+if sd_mtf1
+    newSD := f_ingest(sdZones, lastZT, 4, m1DzT, m1DzB, m1DzX, 1, "1-SD", tfM1 + " Demand", sd_overlap, sd_to_show, show_sd, C_DEMAND, C_BULL) or newSD
+    newSD := f_ingest(sdZones, lastZT, 5, m1SzT, m1SzB, m1SzX, -1, "1-SD", tfM1 + " Supply", sd_overlap, sd_to_show, show_sd, C_SUPPLY, C_BEAR) or newSD
+if sd_mtf2
+    newSD := f_ingest(sdZones, lastZT, 8, m2DzT, m2DzB, m2DzX, 1, "2-SD", tfM2 + " Demand", sd_overlap, sd_to_show, show_sd, C_DEMAND, C_BULL) or newSD
+    newSD := f_ingest(sdZones, lastZT, 9, m2SzT, m2SzB, m2SzX, -1, "2-SD", tfM2 + " Supply", sd_overlap, sd_to_show, show_sd, C_SUPPLY, C_BEAR) or newSD
+if sd_mtf3
+    newSD := f_ingest(sdZones, lastZT, 12, m3DzT, m3DzB, m3DzX, 1, "3-SD", tfM3 + " Demand", sd_overlap, sd_to_show, show_sd, C_DEMAND, C_BULL) or newSD
+    newSD := f_ingest(sdZones, lastZT, 13, m3SzT, m3SzB, m3SzX, -1, "3-SD", tfM3 + " Supply", sd_overlap, sd_to_show, show_sd, C_SUPPLY, C_BEAR) or newSD
+if fvg_chart
+    newFVG := f_ingest(fvgZones, lastZT, 2, cBfT, cBfB, cBfX, 1, "C-FVG", tfC + " Bull FVG", fvg_overlap, fvg_to_show, show_fvg, C_BFVG, C_BFVG_BD) or newFVG
+    newFVG := f_ingest(fvgZones, lastZT, 3, cSfT, cSfB, cSfX, -1, "C-FVG", tfC + " Bear FVG", fvg_overlap, fvg_to_show, show_fvg, C_SFVG, C_SFVG_BD) or newFVG
+if fvg_mtf1
+    newFVG := f_ingest(fvgZones, lastZT, 6, m1BfT, m1BfB, m1BfX, 1, "1-FVG", tfM1 + " Bull FVG", fvg_overlap, fvg_to_show, show_fvg, C_BFVG, C_BFVG_BD) or newFVG
+    newFVG := f_ingest(fvgZones, lastZT, 7, m1SfT, m1SfB, m1SfX, -1, "1-FVG", tfM1 + " Bear FVG", fvg_overlap, fvg_to_show, show_fvg, C_SFVG, C_SFVG_BD) or newFVG
+if fvg_mtf2
+    newFVG := f_ingest(fvgZones, lastZT, 10, m2BfT, m2BfB, m2BfX, 1, "2-FVG", tfM2 + " Bull FVG", fvg_overlap, fvg_to_show, show_fvg, C_BFVG, C_BFVG_BD) or newFVG
+    newFVG := f_ingest(fvgZones, lastZT, 11, m2SfT, m2SfB, m2SfX, -1, "2-FVG", tfM2 + " Bear FVG", fvg_overlap, fvg_to_show, show_fvg, C_SFVG, C_SFVG_BD) or newFVG
+if fvg_mtf3
+    newFVG := f_ingest(fvgZones, lastZT, 14, m3BfT, m3BfB, m3BfX, 1, "3-FVG", tfM3 + " Bull FVG", fvg_overlap, fvg_to_show, show_fvg, C_BFVG, C_BFVG_BD) or newFVG
+    newFVG := f_ingest(fvgZones, lastZT, 15, m3SfT, m3SfB, m3SfX, -1, "3-FVG", tfM3 + " Bear FVG", fvg_overlap, fvg_to_show, show_fvg, C_SFVG, C_SFVG_BD) or newFVG
+
+// =====================================================================================
+// FILTERS
+// =====================================================================================
+f_trendOK(int _dir) =>
+    mtf_trend_mode == "All 3 MTF Trends Align" ? (m1Tr == _dir and m2Tr == _dir and m3Tr == _dir) : (m3Tr == _dir and (m1Tr == _dir or m2Tr == _dir))
+
+f_zoneFor(int _dir) =>
+    bool _useClose = mtf_zone_act == "Candle Close"
+    Zone _z = na
+    if mtf_zone_mode == "Supply/Demand" or mtf_zone_mode == "Both"
+        _z := f_findZone(sdZones, _dir, _useClose)
+    if na(_z) and (mtf_zone_mode == "FVG" or mtf_zone_mode == "Both")
+        _z := f_findZone(fvgZones, _dir, _useClose)
+    _z
+
+f_zoneInfo(Zone _z) =>
+    na(_z) ? "None (structure SL)" : _z.name + " [" + str.tostring(_z.bot, format.mintick) + " - " + str.tostring(_z.top, format.mintick) + "]"
+
+// =====================================================================================
+// LOT SIZE  (Dynamic: lot = SL Risk USD / (|Entry - SL| x Contract Size), or Fixed)
+//   Returns na when the trade must be skipped.
+// =====================================================================================
+f_tradeLot(float _entry, float _sl) =>
+    float _res = na
+    if lot_mode == "Fixed Lot Size"
+        _res := fixed_lot
+    else
+        float _dist = math.abs(_entry - _sl)
+        float _raw  = _dist > 0 ? sl_risk_usd / (_dist * contract_size) : na
+        float _lot  = na(_raw) ? na : lot_rounding == "2 Decimal Round Figure" ? math.round(_raw, 2) : math.floor(_raw * 100.0 + 1e-9) / 100.0
+        if not na(_lot)
+            if _lot < min_lot
+                _res := below_min_action == "Use Minimum Lot" ? min_lot : na
+            else
+                _res := math.min(_lot, max_lot)
+    _res
+
+f_signal(int _dir, string _kind, float _sl, float _tp, string _zinfo, float _pct, array<label> _store) =>
+    float  _slB    = _sl - _dir * sl_buffer_pts * point_size
+    float  _tpB    = _tp - _dir * tp_buffer_pts * point_size
+    float  _lot    = f_tradeLot(close, _slB)
+    float  _risk   = na(_lot) ? na : _lot * contract_size * math.abs(close - _slB)
+    string _lotTxt = na(_lot) ? "Lot < Min (skip)" : "Lot: " + str.tostring(_lot, "0.00")
+    string _tip    = _kind + "\nEntry: " + str.tostring(close, format.mintick) + "\nSL Price: " + str.tostring(_slB, format.mintick) + "\nTP (Structure " + (_dir == 1 ? "High" : "Low") + "): " + str.tostring(_tpB, format.mintick) + "\nRetracement: " + str.tostring(_pct, "#.0") + "%" + "\nZone: " + _zinfo + "\n" + _lotTxt + "\nRisk: $" + str.tostring(_risk, "0.00")
+    f_pushLabel(_store, label.new(time, _dir == 1 ? low : high, _kind + "\n" + _lotTxt, xloc = xloc.bar_time, yloc = _dir == 1 ? yloc.belowbar : yloc.abovebar, style = _dir == 1 ? label.style_label_up : label.style_label_down, color = _dir == 1 ? C_BULL : C_BEAR, textcolor = color.white, size = size.small, tooltip = _tip), bos_keep)
+    _tip
+
+// =====================================================================================
+// STRUCTURE DRAWINGS
+// =====================================================================================
+var array<line>  bosLines  = array.new<line>()
+var array<label> bosLabels = array.new<label>()
+var array<line>  liqLines  = array.new<line>()
+var array<label> liqLabels = array.new<label>()
+var array<label> hlLabels  = array.new<label>()
+var array<label> possDots  = array.new<label>()
+var array<label> sigLabels = array.new<label>()
+var label        possTxt   = na
+
+// ---- BOS ----
+if eBos != 0 and show_bos_labels and not na(eLvlT)
+    color _c = eBos == 1 ? C_BULL : C_BEAR
+    f_pushLine(bosLines, line.new(eLvlT, eLvl, time, eLvl, xloc = xloc.bar_time, color = _c, style = line.style_solid, width = 1), bos_keep)
+    string _t = "BOS (" + (eStrong ? "Strong" : "Weak") + ") - " + str.tostring(ePct, "#.0") + "%"
+    f_pushLabel(bosLabels, label.new(eLvlT + math.round((time - eLvlT) / 2.0), eLvl, _t, xloc = xloc.bar_time, style = eBos == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _c, size = size.small), bos_keep)
+
+// ---- CHoCH ----
+if eChoch != 0 and show_choch_labels and not na(eLvlT)
+    color _c = eChoch == 1 ? C_BULL : C_BEAR
+    f_pushLine(bosLines, line.new(eLvlT, eLvl, time, eLvl, xloc = xloc.bar_time, color = _c, style = line.style_dashed, width = 1), bos_keep)
+    f_pushLabel(bosLabels, label.new(eLvlT + math.round((time - eLvlT) / 2.0), eLvl, "CHoCH", xloc = xloc.bar_time, style = eChoch == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _c, size = size.small), bos_keep)
+
+// ---- Liquidity hunts ----
+if eLiq != 0 and show_liq_labels and not na(eLiqT)
+    f_pushLine(liqLines, line.new(eLiqT, eLiqLvl, time, eLiqLvl, xloc = xloc.bar_time, color = C_LIQ, style = line.style_dashed, width = 1), bos_keep)
+    f_pushLabel(liqLabels, label.new(time, eLiqLvl, "Liquidity Hunt", xloc = xloc.bar_time, style = eLiq == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = C_LIQ, size = size.tiny), bos_keep)
+
+// ---- HH / HL / LH / LL ----
+if eSw != 0 and show_hl_labels and not na(eSwT)
+    string _txt = eSw == 1 ? "HH" : eSw == 2 ? "LH" : eSw == 3 ? "HL" : "LL"
+    if eSwStr == 1
+        _txt := _txt + " (Strong)"
+    else if eSwStr == 0
+        _txt := _txt + " (Weak)"
+    bool _isHigh = eSw == 1 or eSw == 2
+    f_pushLabel(hlLabels, label.new(eSwT, eSwP, _txt, xloc = xloc.bar_time, style = _isHigh ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _isHigh ? C_BEAR : C_BULL, size = size.tiny), hl_keep)
+
+// ---- Possible High / Low ----
+if ePoss != 0 and show_poss_labels and not na(ePossT)
+    f_pushLabel(possDots, label.new(ePossT, ePossLvl, "", xloc = xloc.bar_time, style = label.style_circle, color = C_POSS, size = size.tiny), poss_dots_keep)
+    label.delete(possTxt)
+    possTxt := label.new(ePossT, ePossLvl, ePoss == 1 ? "Possible Low (Not Confirmed)" : "Possible High (Not Confirmed)", xloc = xloc.bar_time, style = ePoss == 1 ? label.style_label_up : label.style_label_down, color = color.new(color.black, 100), textcolor = C_POSS, size = size.tiny)
+if eBos != 0 or eChoch != 0
+    label.delete(possTxt)
+    possTxt := na
+
+// =====================================================================================
+// SIGNALS  (same rules as the indicator; a signal type is traded only when it is shown)
+// =====================================================================================
+var int   possCnt      = 0
+var float lastSigClose = na
+var float lastSigWick  = na
+if eBos != 0 or eChoch != 0
+    possCnt      := 0
+    lastSigClose := na
+    lastSigWick  := na
+
+bool chochOK = sig_after_choch == "Immediate" or cBosSince >= 1
+
+int    sigDir  = 0
+int    sigType = 0          // 1 = Possible, 2 = Retrace
+float  sigSL   = na
+float  sigTP   = na
+string sigKind = ""
+
+// ---- Possible Buy / Sell ----
+if show_poss_sig and ePoss != 0 and ePoss == cTrend
+    int   _dir    = ePoss
+    bool  _pctOK  = ePossPct >= poss_min_ret and ePossPct <= poss_max_ret
+    bool  _cntOK  = possCnt < max_poss_sigs
+    bool  _modeOK = na(lastSigClose) or (poss_sig_mode == "Aggressive" ? (_dir == 1 ? close < lastSigClose : close > lastSigClose) : (_dir == 1 ? close < lastSigWick : close > lastSigWick))
+    bool  _trOK   = not use_mtf_trend_poss or f_trendOK(_dir)
+    Zone  _z      = f_zoneFor(_dir)
+    bool  _zOK    = not use_mtf_zone_poss or not na(_z)
+    if _pctOK and _cntOK and _modeOK and chochOK and _trOK and _zOK
+        possCnt      += 1
+        lastSigClose := close
+        lastSigWick  := _dir == 1 ? low : high
+        bool _useZ = use_mtf_zone_poss and not na(_z)
+        sigDir  := _dir
+        sigType := 1
+        sigSL   := _dir == 1 ? (_useZ ? _z.bot : cSL) : (_useZ ? _z.top : cSH)
+        sigTP   := _dir == 1 ? cSH : cSL
+        sigKind := _dir == 1 ? "Possible Buy" : "Possible Sell"
+        f_signal(_dir, sigKind, sigSL, sigTP, _useZ ? f_zoneInfo(_z) : "Filter off / none", ePossPct, sigLabels)
+
+// ---- Retrace Buy / Sell (bar where the retracement starts) ----
+if show_ret_sig and sigDir == 0 and eRet != 0 and cRetPct <= ret_max_pct
+    int  _dir  = -eRet
+    bool _trOK = not use_mtf_trend_ret or f_trendOK(_dir)
+    Zone _z    = f_zoneFor(_dir)
+    bool _zOK  = not use_mtf_zone_ret or not na(_z)
+    if _trOK and _zOK and chochOK
+        bool _useZ = use_mtf_zone_ret and not na(_z)
+        sigDir  := _dir
+        sigType := 2
+        sigSL   := _dir == 1 ? (_useZ ? _z.bot : cSL) : (_useZ ? _z.top : cSH)
+        sigTP   := _dir == 1 ? cSH : cSL
+        sigKind := _dir == 1 ? "Retrace Buy" : "Retrace Sell"
+        f_signal(_dir, sigKind, sigSL, sigTP, _useZ ? f_zoneInfo(_z) : "Filter off / none", cRetPct, sigLabels)
+
+// =====================================================================================
+// CURRENT STRUCTURE FIBONACCI
+// =====================================================================================
+var array<line>  fibLines = array.new<line>()
+var array<label> fibLbls  = array.new<label>()
+var array<float> fibLvls  = array.from(0.0, 0.236, 0.382, 0.5, 0.618, 0.705, 0.79, 1.0)
+
+if barstate.islast
+    while array.size(fibLines) > 0
+        line.delete(array.pop(fibLines))
+    while array.size(fibLbls) > 0
+        label.delete(array.pop(fibLbls))
+    if show_curr_fib and cTrend != 0 and not na(fTop) and not na(fBot) and not na(fT0) and fTop > fBot
+        float _rng = fTop - fBot
+        for _i = 0 to array.size(fibLvls) - 1
+            float _lv = array.get(fibLvls, _i)
+            float _p  = cTrend == 1 ? fTop - _rng * _lv : fBot + _rng * _lv
+            array.push(fibLines, line.new(fT0, _p, time, _p, xloc = xloc.bar_time, color = color.new(C_FIB, 30), style = line.style_dotted, width = 1))
+            if show_fib_labels
+                array.push(fibLbls, label.new(time, _p, str.tostring(_lv * 100, "#.#") + "% (" + str.tostring(_p, format.mintick) + ")", xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = C_FIB, size = size.tiny))
+
+// =====================================================================================
+// MARKET STRUCTURE TABLE (Chart + MTF 1 + MTF 2 + MTF 3)
+// =====================================================================================
+f_tblPos(string _p) =>
+    switch _p
+        "Top Left"      => position.top_left
+        "Bottom Right"  => position.bottom_right
+        "Bottom Left"   => position.bottom_left
+        "Middle Right"  => position.middle_right
+        "Bottom Center" => position.bottom_center
+        => position.top_right
+
+string tblSize = table_size == "Tiny" ? size.tiny : table_size == "Large" ? size.large : size.small
+var table tbl = table.new(f_tblPos(table_pos), 6, 5, bgcolor = color.new(#131722, 10), frame_color = color.new(C_NEUTRAL, 50), frame_width = 1, border_color = color.new(C_NEUTRAL, 70), border_width = 1)
+
+f_statusTxt(int _tr, int _st) =>
+    _st == 3 ? "Retracement" : _st == 1 ? (_tr == 1 ? "Bullish BOS" : "Bearish BOS") : _st == 2 ? (_tr == 1 ? "Bullish CHoCH" : "Bearish CHoCH") : "-"
+
+f_row(int _r, string _tf, int _tr, int _st, float _rp, float _h, float _l) =>
+    color _tc = _tr == 1 ? C_BULL : _tr == -1 ? C_BEAR : C_NEUTRAL
+    table.cell(tbl, 0, _r, _tf, text_color = color.white, text_size = tblSize)
+    table.cell(tbl, 1, _r, _tr == 1 ? "Bullish" : _tr == -1 ? "Bearish" : "-", text_color = _tc, text_size = tblSize)
+    table.cell(tbl, 2, _r, f_statusTxt(_tr, _st), text_color = _st == 3 ? C_LIQ : _tc, text_size = tblSize)
+    table.cell(tbl, 3, _r, na(_rp) ? "-" : str.tostring(_rp, "#.0") + "%", text_color = color.white, text_size = tblSize)
+    table.cell(tbl, 4, _r, na(_h) ? "-" : str.tostring(_h, format.mintick), text_color = C_BEAR, text_size = tblSize)
+    table.cell(tbl, 5, _r, na(_l) ? "-" : str.tostring(_l, format.mintick), text_color = C_BULL, text_size = tblSize)
+
+if barstate.islast
+    if show_table
+        table.cell(tbl, 0, 0, "TF", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 1, 0, "Trend", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 2, 0, "Status", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 3, 0, "Ret %", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 4, 0, "High Price", text_color = C_NEUTRAL, text_size = tblSize)
+        table.cell(tbl, 5, 0, "Low Price", text_color = C_NEUTRAL, text_size = tblSize)
+        f_row(1, "Chart " + tfC, cTrend, cStatus, cFibPct, cSH, cSL)
+        f_row(2, "MTF 1 " + tfM1, m1Tr, m1St, m1Rp, m1H, m1L)
+        f_row(3, "MTF 2 " + tfM2, m2Tr, m2St, m2Rp, m2H, m2L)
+        f_row(4, "MTF 3 " + tfM3, m3Tr, m3St, m3Rp, m3H, m3L)
+    else
+        table.clear(tbl, 0, 0, 5, 4)
+
+// =====================================================================================
+// STRATEGY EXECUTION
+// =====================================================================================
+// ---------------- Sessions ----------------
+f_tz(string _s) =>
+    switch _s
+        "Auto (Exchange)" => syminfo.timezone
+        "Auto (London)"   => "Europe/London"
+        "Auto (New York)" => "America/New_York"
+        "Auto (Tokyo)"    => "Asia/Tokyo"
+        => str.replace_all(_s, " ", "")
+
+f_inSess(string _sess, string _tz) =>
+    not na(time(timeframe.period, _sess + ":1234567", _tz))
+
+// minutes-of-day of the session END ("0815-1600" -> 960)
+f_endMin(string _sess) =>
+    float _e = str.tonumber(str.substring(_sess, 5, 9))
+    na(_e) ? na : int(math.floor(_e / 100.0)) * 60 + int(_e % 100.0)
+
+// true when the session end falls inside this candle -> this is the LAST candle of the session
+f_reachesEnd(string _sess, string _tz) =>
+    int  _e = f_endMin(_sess)
+    int  _o = hour(time, _tz) * 60 + minute(time, _tz)
+    int  _c = hour(time_close, _tz) * 60 + minute(time_close, _tz)
+    bool _r = (na(_e) or na(time_close)) ? false : _o < _c ? (_e > _o and _e <= _c) : (_e > _o or _e <= _c)
+    _r
+
+string tzAsia    = f_tz(asia_tz)
+string tzLondon  = f_tz(london_tz)
+string tzNY      = f_tz(ny_tz)
+bool   asiaNow   = f_inSess(asia_sess, tzAsia)
+bool   londonNow = f_inSess(london_sess, tzLondon)
+bool   nyNow     = f_inSess(ny_sess, tzNY)
+bool   asiaEnd   = f_reachesEnd(asia_sess, tzAsia)
+bool   londonEnd = f_reachesEnd(london_sess, tzLondon)
+bool   nyEnd     = f_reachesEnd(ny_sess, tzNY)
+
+bool sessFilterOn = (use_asia or use_london or use_ny) and not timeframe.isdwm
+bool inSession    = not sessFilterOn or (use_asia and asiaNow) or (use_london and londonNow) or (use_ny and nyNow)
+bool sessEndNow   = sessFilterOn and ((use_asia and asiaNow and asiaEnd) or (use_london and londonNow and londonEnd) or (use_ny and nyNow and nyEnd) or (inSession[1] and not inSession))
+
+bgcolor(sessFilterOn and inSession ? color.new(#2962ff, 94) : na, title = "Trading Session")
+
+// ---------------- Trade object ----------------
+type Trade
+    string id
+    int    dir
+    int    magic
+    string kind
+    float  entry
+    float  sl0                 // original SL (risk reference)
+    float  sl                  // current SL
+    float  tp
+    float  lot
+    int    t0
+    bool   locked  = false
+    bool   sessCls = false
+    box    tpBox
+    box    slBox
+    label  lbl
+
+var array<Trade> openTrades = array.new<Trade>()
+var array<box>   rrBoxes    = array.new<box>()
+var array<label> rrLabels   = array.new<label>()
+var int          tradeSeq   = 0
+
+// ---------------- Webhook JSON ----------------
+int    priceDec = math.max(0, int(math.ceil(-math.log10(syminfo.mintick) - 1e-9)))
+string PFMT     = priceDec > 0 ? "0." + str.repeat("0", priceDec) : "0"
+
+f_jsonOpen(Trade _t) =>
+    '{"action":"' + (_t.dir == 1 ? "BUY" : "SELL") + '","symbol":"' + trade_symbol + '","lot":' + str.tostring(_t.lot, "0.00") + ',"sl":' + str.tostring(_t.sl, PFMT) + ',"tp":' + str.tostring(_t.tp, PFMT) + ',"magic":' + str.tostring(_t.magic) + ',"id":"' + _t.id + '","comment":"' + _t.kind + '"}'
+
+f_jsonClose(Trade _t) =>
+    '{"action":"CLOSE","symbol":"' + trade_symbol + '","magic":' + str.tostring(_t.magic) + ',"id":"' + _t.id + '"}'
+
+f_jsonModify(Trade _t) =>
+    '{"action":"MODIFY","symbol":"' + trade_symbol + '","magic":' + str.tostring(_t.magic) + ',"id":"' + _t.id + '","sl":' + str.tostring(_t.sl, PFMT) + ',"tp":' + str.tostring(_t.tp, PFMT) + '}'
+
+string jsonCloseAll = '{"action":"CLOSE_ALL","symbol":"' + trade_symbol + '","magic_base":' + str.tostring(magic_base) + '}'
+
+// move a finished trade's drawings to the history buffer and trim it
+f_archive(Trade _t) =>
+    if not na(_t.tpBox)
+        array.push(rrBoxes, _t.tpBox)
+    if not na(_t.slBox)
+        array.push(rrBoxes, _t.slBox)
+    if not na(_t.lbl)
+        array.push(rrLabels, _t.lbl)
+    while array.size(rrBoxes) > rr_keep * 2
+        box.delete(array.shift(rrBoxes))
+    while array.size(rrLabels) > rr_keep
+        label.delete(array.shift(rrLabels))
+    array.size(rrLabels)
+
+// ---- 1) SYNC: find trades the broker emulator closed during this candle (SL / TP / lock / session)
+int nOpen = array.size(openTrades)
+if nOpen > 0
+    for i = nOpen - 1 to 0
+        Trade tr = array.get(openTrades, i)
+        if time > tr.t0
+            bool stillOpen = false
+            if strategy.opentrades > 0
+                for k = 0 to strategy.opentrades - 1
+                    if strategy.opentrades.entry_id(k) == tr.id
+                        stillOpen := true
+                        break
+            if stillOpen
+                if not na(tr.tpBox)
+                    box.set_right(tr.tpBox, time)
+                if not na(tr.slBox)
+                    box.set_right(tr.slBox, time)
+            else
+                float exitPx = na
+                float pnl    = na
+                int   nC     = strategy.closedtrades
+                if nC > 0
+                    for k = nC - 1 to math.max(0, nC - 100)
+                        if strategy.closedtrades.entry_id(k) == tr.id
+                            exitPx := strategy.closedtrades.exit_price(k)
+                            pnl    := strategy.closedtrades.profit(k)
+                            break
+                float  tol = syminfo.mintick * 2
+                string why = tr.sessCls ? "Session End" : na(exitPx) ? "Not Filled" : tr.dir * (exitPx - tr.tp) >= -tol ? "TP" : tr.dir * (tr.sl - exitPx) >= -tol ? (tr.locked ? "Profit Lock" : "SL") : "Closed"
+                if why == "Not Filled"
+                    box.delete(tr.tpBox)
+                    box.delete(tr.slBox)
+                    label.delete(tr.lbl)
+                else
+                    float riskDist = math.abs(tr.entry - tr.sl0)
+                    float rMult    = riskDist > 0 ? tr.dir * (exitPx - tr.entry) / riskDist : 0.0
+                    if not na(tr.tpBox)
+                        box.set_right(tr.tpBox, time)
+                    if not na(tr.slBox)
+                        box.set_right(tr.slBox, time)
+                    if not na(tr.lbl)
+                        label.set_text(tr.lbl, label.get_text(tr.lbl) + "\n" + why + " " + (pnl >= 0 ? "+" : "") + str.tostring(pnl, "0.00") + " USD (" + str.tostring(rMult, "0.00") + "R)")
+                        label.set_textcolor(tr.lbl, pnl >= 0 ? C_BULL : C_BEAR)
+                    f_archive(tr)
+                array.remove(openTrades, i)
+
+// ---- 2) SESSION END: close everything on the last candle of the session
+bool closingNow = sessEndNow and close_on_sess_end and (strategy.position_size != 0 or array.size(openTrades) > 0)
+if closingNow
+    strategy.close_all(comment = "Session End", alert_message = jsonCloseAll)
+    for tr in openTrades
+        tr.sessCls := true
+
+// ---- 3) PROFIT LOCK: after Trigger % of the TP distance, move SL to Move-SL % of the TP distance
+if use_profit_lock and not closingNow
+    for tr in openTrades
+        if not tr.locked and time > tr.t0
+            float dist  = math.abs(tr.tp - tr.entry)
+            float reach = tr.dir == 1 ? high - tr.entry : tr.entry - low
+            if dist > 0 and reach >= dist * lock_trigger_pct / 100.0
+                float newSL = tr.entry + tr.dir * dist * lock_sl_pct / 100.0
+                if tr.dir * (newSL - tr.sl) > 0
+                    tr.sl     := newSL
+                    tr.locked := true
+                    strategy.exit("X" + tr.id, from_entry = tr.id, stop = newSL, limit = tr.tp, comment_loss = "Profit Lock", comment_profit = "TP", alert_message = f_jsonClose(tr))
+                    alert(f_jsonModify(tr), alert.freq_once_per_bar_close)
+                    if not na(tr.slBox)
+                        box.set_top(tr.slBox, math.max(tr.entry, newSL))
+                        box.set_bottom(tr.slBox, math.min(tr.entry, newSL))
+                        box.set_bgcolor(tr.slBox, color.new(#2962ff, 75))
+                        box.set_border_color(tr.slBox, color.new(#2962ff, 30))
+
+// ---- 4) NEW ENTRY on a signal candle
+bool dirAllowed = sigDir == 1 ? trade_buys : sigDir == -1 ? trade_sells : false
+if sigDir != 0 and dirAllowed and inSession and not sessEndNow
+    bool slotFree = not one_trade or (strategy.position_size == 0 and array.size(openTrades) == 0)
+    if slotFree
+        float ePx   = close
+        float slPx  = sigSL - sigDir * sl_buffer_pts * point_size
+        float tpPx  = sigTP - sigDir * tp_buffer_pts * point_size
+        float slPts = math.abs(ePx - slPx) / point_size
+        bool  ok    = sigDir * (tpPx - ePx) > 0 and sigDir * (ePx - slPx) > 0
+        if ok and max_sl_mode == "Skip Trade" and slPts > max_sl_pts
+            ok := false
+        if ok and max_sl_mode == "Limit SL" and slPts > max_sl_pts
+            slPx := ePx - sigDir * max_sl_pts * point_size
+        float lot = ok ? f_tradeLot(ePx, slPx) : na
+        if ok and not na(lot) and lot > 0
+            tradeSeq += 1
+            string tid = "STM#" + str.tostring(tradeSeq)
+            int    mg  = magic_base * 10 + sigType
+            float  qty = lot * contract_size / syminfo.pointvalue
+            Trade  nt  = Trade.new(tid, sigDir, mg, sigKind, ePx, slPx, slPx, tpPx, lot, time)
+            strategy.entry(tid, sigDir == 1 ? strategy.long : strategy.short, qty = qty, comment = sigKind, alert_message = f_jsonOpen(nt))
+            strategy.exit("X" + tid, from_entry = tid, stop = slPx, limit = tpPx, comment_loss = "SL", comment_profit = "TP", alert_message = f_jsonClose(nt))
+            if show_rr_plot
+                nt.tpBox := box.new(time, math.max(tpPx, ePx), time, math.min(tpPx, ePx), xloc = xloc.bar_time, bgcolor = color.new(C_BULL, 80), border_color = color.new(C_BULL, 40))
+                nt.slBox := box.new(time, math.max(slPx, ePx), time, math.min(slPx, ePx), xloc = xloc.bar_time, bgcolor = color.new(C_BEAR, 80), border_color = color.new(C_BEAR, 40))
+            if show_rr_label
+                float rr   = math.abs(tpPx - ePx) / math.abs(ePx - slPx)
+                float risk = lot * contract_size * math.abs(ePx - slPx)
+                nt.lbl := label.new(time, tpPx, sigKind + " | RR 1:" + str.tostring(rr, "0.00") + "\nLot " + str.tostring(lot, "0.00") + " | Risk " + str.tostring(risk, "0.00") + " USD", xloc = xloc.bar_time, style = sigDir == 1 ? label.style_label_down : label.style_label_up, color = color.new(#131722, 15), textcolor = color.white, size = size.tiny)
+            array.push(openTrades, nt)
+
+// ---------------- Automation note ----------------
+var table noteTbl = table.new(position.bottom_left, 1, 1, bgcolor = color.new(#131722, 10), frame_color = color.new(C_NEUTRAL, 50), frame_width = 1)
+if barstate.islast
+    if show_auto_note
+        string noteTxt = "WEBHOOK AUTOMATION (MT5 bridge)\n1. Create Alert > Condition: STM SSM Strategy Tester\n2. Choose: Order fills and alert() function calls\n3. Message: {{strategy.order.alert_message}}\n4. Webhook URL: your MT5 bridge endpoint\nSymbol: " + trade_symbol + " | Magic: " + str.tostring(magic_base * 10 + 1) + " (Possible) / " + str.tostring(magic_base * 10 + 2) + " (Retrace)\nLot: " + (lot_mode == "Fixed Lot Size" ? "Fixed " + str.tostring(fixed_lot, "0.00") : "Dynamic, risk " + str.tostring(sl_risk_usd, "0.00") + " USD, " + str.tostring(min_lot, "0.00") + "-" + str.tostring(max_lot, "0.00")) + "\nActions sent: BUY / SELL / MODIFY / CLOSE / CLOSE_ALL"
+        table.cell(noteTbl, 0, 0, noteTxt, text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    else
+        table.clear(noteTbl, 0, 0, 0, 0)
+
+// =====================================================================================
+// DATA WINDOW
+// =====================================================================================
+plot(cSH,     "Structure High",  color = C_BEAR, display = display.data_window)
+plot(cSL,     "Structure Low",   color = C_BULL, display = display.data_window)
+plot(cRetPct, "Retracement % (Last Base)", color = C_NEUTRAL, display = display.data_window)
+plot(cFibPct, "Retracement % (Fib Base)",  color = C_NEUTRAL, display = display.data_window)
+plot(cTrend,  "Chart Trend",     color = C_NEUTRAL, display = display.data_window)

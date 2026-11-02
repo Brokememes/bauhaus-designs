@@ -4,7 +4,12 @@ A Pine Script v5 TradingView indicator for market structure. It works out struct
 
 The chart and all three higher timeframes (MTF 1 / 2 / 3, through `request.security`) run the same engine (`f_engine()`). The table, trend filter and MTF zones therefore all use one definition of structure.
 
-File: [`STM_Smart_Structure_Mastery.pine`](./STM_Smart_Structure_Mastery.pine)
+Files:
+
+| File | What it is |
+|---|---|
+| [`STM_Smart_Structure_Mastery.pine`](./STM_Smart_Structure_Mastery.pine) | The indicator: structure, zones, signals, table and alerts |
+| [`STM_SSM_Strategy_Tester.pine`](./STM_SSM_Strategy_Tester.pine) | **STM \| SSM Strategy Tester v1.61**: the same engine as a `strategy()` for backtesting and MT5 webhook automation (see [section 4](#4-stm--ssm-strategy-tester-v161)) |
 
 ---
 
@@ -325,5 +330,157 @@ All alerts use `alert(..., alert.freq_once_per_bar_close)`. To receive them, cre
 * **Wick sweeps don't break structure.** A wick below `struct_low` that closes back above is a liquidity hunt, so a pullback can read slightly above 100% without a CHoCH.
 * **Data Window.** Structure High, Structure Low, both retracement percentages and Chart Trend appear in the Data Window for inspection.
 * **Verification.** The structure engine was ported line by line to Python and run on 5 × 20,000 synthetic bars, across every Retracement Condition × CHoCH Condition combination. Invariants checked on every bar: no close beyond a structure level without a BOS/CHoCH, non-negative BOS and Possible percentages, leg extremes always contain the current bar, and the struct high always above the struct low when a retracement starts.
+
+## 4. STM | SSM Strategy Tester v1.61
+
+`STM_SSM_Strategy_Tester.pine` is a Pine v5 **strategy**. It copies the indicator's structure engine, zones, MTF filters and signal rules unchanged, then turns the signals into trades in TradingView's Strategy Tester. Every trade can also be sent as a JSON webhook to an MT5 bridge.
+
+### 4.1 Installation
+
+1. Pine Editor → paste `STM_SSM_Strategy_Tester.pine` → **Save** → **Add to chart**.
+2. Use the chart timeframe the indicator uses (for example XAUUSD 1m). For more than a few weeks of 1m data, turn on **Deep Backtesting** in the Strategy Tester.
+3. **Properties** tab: set *Initial capital* (default 10,000 USD). Optionally set commission and slippage for your broker; both default to 0.
+
+### 4.2 Which signals are traded
+
+| Signal | Traded when |
+|---|---|
+| Possible Buy / Sell | **Show Possible Buy/Sell Signals** is ON (default ON) |
+| Retrace Buy / Sell | **Show Retrace Buy/Sell Signals** is ON (default OFF) |
+
+All the indicator filters still apply: Fib range, max signals per cycle, Aggressive / Precise, Signal Activation After CHoCH, MTF trend filter and MTF zone filter. On top of those, a signal is traded only when:
+
+* its direction is allowed (**Trade Buy Signals** / **Trade Sell Signals**),
+* the candle is inside an enabled trading session and is not the session's last candle,
+* **One Trade At A Time** is OFF, or no trade is open,
+* the SL is on the correct side of entry, the TP is beyond entry, and the Max SL rule doesn't skip it.
+
+Orders are processed **on the signal candle's close** (`process_orders_on_close = true`), the same moment an EA reacts to a closed candle.
+
+### 4.3 Entry, SL and TP
+
+```
+entry = close of the signal candle
+SL    = zone bottom / top  (if that signal's zone filter is ON and a zone was found)
+      = struct_low / struct_high otherwise
+        then moved SL Buffer Points further away:  SL = SL - dir x sl_buffer x point_size
+TP    = struct_high (buy) / struct_low (sell)
+        then pulled TP Buffer Points closer:       TP = TP - dir x tp_buffer x point_size
+```
+
+**Max SL Mode** (`SL points = |entry - SL| / Point Size`):
+
+| Mode | Effect when SL points > Max SL Points |
+|---|---|
+| OFF | nothing |
+| Skip Trade | the signal is not traded |
+| Limit SL | SL is moved to `entry - dir x Max SL Points x Point Size` |
+
+### 4.4 Profit Lock (break-even in profit)
+
+```
+TP distance = |TP - entry|
+trigger     : price has moved >= Trigger % x TP distance in favour (uses the candle high for buys, low for sells)
+action      : SL -> entry + dir x (Move SL to %) x TP distance          (only if that is better than the current SL)
+```
+
+With the defaults (40% / 10%): buy at 2400.00 with TP 2410.00 → once price reaches 2404.00, the SL moves to 2401.00. The new stop applies from the next candle, and a `MODIFY` webhook is sent.
+
+### 4.5 Trading sessions
+
+| Session | Default | Time zone | Window |
+|---|---|---|---|
+| Asia | off | GMT +5 | 09:00–10:00 |
+| London | off | Auto (London) | 03:00–04:00 |
+| NY | **on** | Auto (New York) | 08:15–16:00 (= 17:15–01:00 Pakistan time) |
+
+* **Auto (...)** time zones follow daylight saving (`America/New_York`, `Europe/London`, `Asia/Tokyo`). `GMT ±x` is fixed.
+* Windows may cross midnight, for example `1715-0100`.
+* **Untick all three sessions to trade 24 hours.** Session settings are ignored on daily and higher charts.
+* **Close All Trades When Trading Session Ends:** the engine detects the **last candle** of each enabled session (the candle whose close time reaches the session end) and closes every open trade at that candle's close. This keeps trades out of the overnight and weekend gaps. If the market closes before the session end, the first candle outside the session closes them instead. Sessions are handled independently, so the end of one enabled session closes all trades even if another session is still open.
+
+### 4.6 Lot size
+
+| Lot Size Mode | Lot |
+|---|---|
+| Dynamic Lot Size | `raw = SL Risk USD / (|entry - SL| x Contract Size)`, rounded (Round Figure or Round Down, 2 decimals), capped at **Maximum Lot**. Below **Minimum Lot**: *Use Minimum Lot* (default; risk ends up a little above target) or *Skip Trade*. |
+| Fixed Lot Size | **Fixed Lot Size** on every trade |
+
+The Strategy Tester order quantity is `lot x Contract Size / syminfo.pointvalue` units. On XAUUSD (point value 1), 0.05 lot = 5 oz, so a 1.00 move = 5 USD, the same P&L as MT5.
+
+| Account | Suggested settings from the video |
+|---|---|
+| 1,000 USD | SL Risk 15, Max Lot 0.05 |
+| 10,000 USD (0.5%) | SL Risk 50, Max Lot 0.05 |
+| 10,000 USD (1%) | SL Risk 100, Max Lot 1.00 |
+
+### 4.7 RR plot
+
+* Green box: entry → TP. Red box: entry → SL. The red box turns **blue** and moves when the profit lock shifts the SL.
+* The RR label shows the signal, `RR 1:x.xx`, lot and USD risk. When the trade closes, the label adds the result (`TP`, `SL`, `Profit Lock`, `Session End` or `Closed`), the USD P&L and the **R multiple**.
+* **RR Trades To Keep** limits how many finished trades stay drawn (default 60).
+
+### 4.8 Webhook automation (MT5 bridge)
+
+1. **Create Alert** → Condition: *STM SSM Strategy Tester* → **Order fills and alert() function calls**.
+2. Message: `{{strategy.order.alert_message}}`
+3. Notifications → **Webhook URL**: your MT5 bridge endpoint.
+
+**Magic number** = `Magic Base x 10 + signal type`, where type 1 = Possible and 2 = Retrace. With the default 786: **7861** / **7862**.
+
+JSON sent (prices use the symbol's tick decimals):
+
+```json
+{"action":"BUY","symbol":"XAUUSD","lot":0.05,"sl":2398.50,"tp":2410.20,"magic":7861,"id":"STM#12","comment":"Possible Buy"}
+{"action":"MODIFY","symbol":"XAUUSD","magic":7861,"id":"STM#12","sl":2401.00,"tp":2410.20}
+{"action":"CLOSE","symbol":"XAUUSD","magic":7861,"id":"STM#12"}
+{"action":"CLOSE_ALL","symbol":"XAUUSD","magic_base":786}
+```
+
+| Action | Sent when |
+|---|---|
+| BUY / SELL | entry order fills |
+| MODIFY | the profit lock moves the SL (sent through `alert()`) |
+| CLOSE | that trade's SL / TP / locked SL fills in the tester. MT5 normally closes it first on the server-side SL/TP, so treat this as a safety close. |
+| CLOSE_ALL | session end |
+
+**Show Automation Note** draws these setup steps on the chart.
+
+### 4.9 Strategy settings reference
+
+| Group | Input | Default |
+|---|---|---|
+| TRADING SESSIONS - STRATEGY TESTER | Asia / London / NY Session | off / off / **on** |
+| | Asia / London / NY Time Zone | GMT +5 / Auto (London) / Auto (New York) |
+| | Asia / London / NY Trading Session | 09:00–10:00 / 03:00–04:00 / 08:15–16:00 |
+| | Close All Trades When Trading Session Ends | on |
+| STRATEGY RISK & EXECUTION SETTINGS | Trade Buy Signals / Trade Sell Signals | on / on |
+| | One Trade At A Time | on |
+| | Point Size | 0.01 |
+| | TP Buffer Points / SL Buffer Points | 0 / 0 |
+| | Max SL Mode / Max SL Points | OFF / 10000 |
+| | Use Profit Lock | on |
+| | Profit Lock Trigger (% of TP Distance) | 40 |
+| | Move SL to (% of TP Distance) | 10 |
+| STRATEGY RR PLOT SETTINGS | Show RR Plot / Show RR Label | on / on |
+| | RR Trades To Keep | 60 |
+| TRADING SYMBOL & MAGIC NUMBER | Trading Symbol | XAUUSD |
+| | Magic Base (2-3 digits) | 786 |
+| LOT SIZE MANAGEMENT | Lot Size Mode | Dynamic Lot Size |
+| | Contract Size Per 1 Lot | 100 |
+| DYNAMIC LOT SIZE SETTINGS | SL Risk in USD | 50 |
+| | Minimum Lot / Maximum Lot | 0.01 / 0.05 |
+| | Dynamic Lot Rounding Method | 2 Decimal Round Figure |
+| | When Lot < Minimum | Use Minimum Lot |
+| FIXED LOT SIZE SETTINGS | Fixed Lot Size | 0.02 |
+| DISPLAY & DEBUG SETTINGS | Show Automation Note | off |
+
+Groups 1–7 (MTF, structure, signals, S/D and FVG zones) and Display / History are identical to the indicator. The strategy's only different default is FVG **MTF 3 Zones = off**, matching the reference settings. The indicator's alert and lot-size groups are replaced by the strategy groups above, so no plain-text alerts can reach the webhook.
+
+### 4.10 Notes
+
+* **TradingView is netting.** With *One Trade At A Time* OFF, same-direction signals stack (up to 10), but an opposite signal reverses the position. An MT5 hedging account can hold both directions, so results can differ in that mode.
+* **Margin checks are off** (`margin_long = margin_short = 0`) to emulate a leveraged CFD account.
+* Backtest results depend on the data range, commission, slippage and spread. They are not a guarantee of live EA performance.
 
 > Trading involves risk. This indicator is an analytical tool. It does not give financial advice, and its signals are not guaranteed outcomes.
