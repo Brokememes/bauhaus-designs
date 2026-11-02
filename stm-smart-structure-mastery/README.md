@@ -43,14 +43,14 @@ During an impulse the engine tracks:
 | Retracement Condition | Retracement starts when… |
 |---|---|
 | Last Reference Candle Absorb | the reference candle is absorbed (close through `refL` in an uptrend, through `refH` in a downtrend) |
-| 2 Candle Retracement Method | absorbed **and** ≥ 2 non-inside counter-trend candles (uptrend: `close < open and low < low[1]`; downtrend: `close > open and high > high[1]`) |
+| 2 Candle Retracement Method | absorbed **and** ≥ 2 non-inside counter-trend candles. The absorbing candle is #1. Each later candle counts only if it **closes below the low of the previous counted candle** (downtrend: above its high). Candles that close inside that range are inside bars and are ignored. |
 | Retrace confirm after 23.60% | absorbed **and** pullback % ≥ 23.6 |
 | Use All Methods | absorbed **and** ≥ 2 counter candles **and** pullback % ≥ 23.6 |
 
 When the retracement starts in an uptrend:
 
 * `struct_high := legH`. This is the **Confirmed Structure High** (HH/LH).
-* The lowest point between the previous breakout and `struct_high` stays locked as `struct_low`.
+* `struct_low` is locked to the **lowest point between the previous breakout and `struct_high`**. The engine tracks this as `seg`, covering every low up to and including the `legH` candle. If a wick (or, in Strong Structure Base mode, a close through a weak low) went below the old `struct_low` during the impulse, `struct_low` moves down to that point.
 * The retracement extreme `pbExt` starts tracking the lowest low of the pullback.
 
 A downtrend is the mirror image.
@@ -75,7 +75,7 @@ retracement_pct = pullback_depth / impulse_range × 100
 * `≥ 50%`: label `BOS (Strong) - XX.X%`. The new swing low (uptrend) or swing high (downtrend) is marked **Strong**.
 * `< 50%`: label `BOS (Weak) - XX.X%`. The new swing is marked **Weak**.
 
-After a BOS the retracement extreme `pbExt` becomes the new `struct_low` (uptrend) or `struct_high` (downtrend). A new impulse leg starts from the breakout candle, which also becomes the new reference candle.
+After a BOS the retracement extreme `pbExt` becomes the new `struct_low` (uptrend) or `struct_high` (downtrend). The new impulse leg's extreme is the **highest high since that pullback low** (`rb`), which also covers any liquidity wick above the old high. The breakout candle becomes the new reference candle.
 
 **CHoCH / Fib Condition:**
 
@@ -84,13 +84,15 @@ After a BOS the retracement extreme `pbExt` becomes the new `struct_low` (uptren
 | Last Structure Base | the most recent confirmed swing low (uptrend) or swing high (downtrend) |
 | Strong Structure Base | the most recent swing if it is Strong. If it is Weak (< 50%), the last **Strong** swing is used, so closing through a weak swing does **not** flip the trend. |
 
-On a CHoCH, the top (or bottom) of the last leg becomes the new protected high (or low), marked Strong. The BOS counter `bosSince` resets to 0.
+On a CHoCH, the top (or bottom) of the last leg becomes the new protected high (or low), marked Strong. The new leg starts at the lowest low since that top (or the highest high since that bottom). The BOS counter `bosSince` resets to 0.
+
+The same setting also anchors the **Fibonacci** (section 1.10). In Strong Structure Base mode with a weak last swing, the Fib's 100% level is the last *strong* swing, not the weak one.
 
 ### 1.4 Liquidity hunt
 
 ```
-uptrend:  high > struct_high and close <= struct_high      (or low < protected_low and close >= protected_low)
-downtrend: low < struct_low and close >= struct_low       (or high > protected_high and close <= protected_high)
+struct high hunt: high > struct_high and close <= struct_high
+struct low hunt:  low  < struct_low  and close >= struct_low
 ```
 
 Each structure level can fire this at most once. When **Show Liquidity Hunt Labels** is on, the indicator draws a dashed line from the swing to the sweep candle with a `Liquidity Hunt` label.
@@ -101,7 +103,7 @@ While an uptrend is retracing, the engine tracks **bearish reference candles**:
 
 * `close < bRefL` → that candle becomes the new bearish reference (`bRefH`, `bRefL`) and a confirmation is armed.
 * `close > bRefH` while armed → the lowest point of the pullback (`pbExt`) is marked with a dot and the label **`Possible Low (Not Confirmed)`**.
-* If price later makes a **lower** low and confirms again before a BOS, the text label moves to the new low. Earlier dots stay on the chart, up to `poss_dots_keep`.
+* If price later trades **below** the last Possible Low before a BOS, tracking re-arms on that candle. The bearish chain continues, and the next close above the chain's high confirms the new, lower Possible Low. The text label moves to it; earlier dots stay on the chart, up to `poss_dots_keep`.
 * A BOS or CHoCH removes the "Not Confirmed" text.
 
 `Possible High` in a downtrend works the same way in reverse.
@@ -114,7 +116,7 @@ A Possible Buy fires when a Possible Low confirms in an uptrend (Possible Sell: 
 
 | Check | Rule |
 |---|---|
-| Fib depth | `poss_min_ret ≤ (struct_high − possLow)/(struct_high − struct_low)×100 ≤ poss_max_ret` |
+| Fib depth | `poss_min_ret ≤ (struct_high − possLow)/(struct_high − fib_base)×100 ≤ poss_max_ret`, where `fib_base` is the protected low from **CHoCH / Fib Condition**. This is the same % as the drawn Fibonacci. |
 | Cycle limit | signals in the current structure cycle `< max_poss_sigs`. A cycle resets on every BOS / CHoCH. |
 | Mode (2nd+ signal in a cycle) | **Aggressive**: close better than the previous signal's close (lower for a buy, higher for a sell). **Precise**: close beyond the previous signal's wick (below its low for a buy, above its high for a sell). |
 | Activation after CHoCH | **Immediate**, or **After First BOS** (`bosSince ≥ 1`) |
@@ -138,8 +140,8 @@ SL_Price       = zone bottom (buy) / zone top (sell)   if the zone filter for th
 TP             = struct_high (buy) / struct_low  (sell)
 price_distance = |close − SL_Price|
 raw_lot        = sl_risk_usd / (price_distance × contract_size)
-lot            = round(raw_lot, 2)              ("2 Decimal Round Figure")
-               = floor(raw_lot × 100) / 100     ("2 Decimal Round Down")
+lot            = round(raw_lot, 2)                       ("2 Decimal Round Figure")
+               = floor(raw_lot × 100.0 + 1e-9) / 100.0   ("2 Decimal Round Down")
 if lot < min_lot → label shows "Lot < Min"
 if lot > max_lot → lot = max_lot
 ```
@@ -167,8 +169,8 @@ Each signal label has a tooltip with **Entry, SL Price, TP, Retracement %, Zone 
 
 **FVG detection (3 candles).**
 
-* Bullish FVG: `low > high[2]` → zone `[high[2], low]`
-* Bearish FVG: `high < low[2]` → zone `[high, low[2]]`
+* Bullish FVG: `low > high[2]` → zone `[high[2], low]`, drawn from candle 1
+* Bearish FVG: `high < low[2]` → zone `[high, low[2]]`, drawn from candle 1
 * Detection Mode: Both / Trend wise / Supply FVG Only / Demand FVG Only.
 
 **Zone management (applies to chart and MTF zones).**
@@ -187,7 +189,7 @@ Each signal label has a tooltip with **Entry, SL Price, TP, Retracement %, Zone 
 
 ### 1.10 Current structure Fibonacci
 
-On the last bar the indicator draws dotted levels across the active leg, from the protected swing to the current extreme:
+On the last bar the indicator draws dotted levels across the active leg. The leg runs from the **CHoCH / Fib Condition base** (the last swing, or the last strong swing) to the current extreme:
 
 `0%, 23.6%, 38.2%, 50%, 61.8%, 70.5%, 79%, 100%`
 
@@ -200,7 +202,7 @@ downtrend: price = bottom + (top − bottom) × level   (0% = low,  100% = prote
 
 | TF | Trend | Status | Ret % | High Price | Low Price |
 |---|---|---|---|---|---|
-| Chart | Bullish / Bearish | Bullish/Bearish BOS · CHoCH · Retracement | current pullback % | confirmed structure high | confirmed structure low |
+| Chart | Bullish / Bearish | Bullish/Bearish BOS · CHoCH · Retracement | pullback % on the Fib base | current structure high (the running leg high until it is confirmed) | current structure low (likewise) |
 | MTF 1 | … | … | … | … | … |
 | MTF 2 | … | … | … | … | … |
 | MTF 3 | … | … | … | … | … |
@@ -256,7 +258,7 @@ downtrend: price = bottom + (top − bottom) × level   (0% = low,  100% = prote
 | Input | Default |
 |---|---|
 | Show Supply/Demand Zones | true |
-| Zone Confirmation Candles | 5 |
+| Zone Confirmation Candles | 5 (1–100) |
 | Detection Mode | Both Supply/Demand |
 | Supply/Demand Structures to Show | 5 |
 | Allow Overlapping Zones | false |
@@ -315,10 +317,13 @@ All alerts use `alert(..., alert.freq_once_per_bar_close)`. To receive them, cre
 
 ## 3. Implementation notes
 
-* **No drawings inside the engine.** `f_engine()` only returns numbers and booleans, a 42-element tuple, so it can run inside `request.security()`. All lines, labels and boxes are created on the chart from the engine's per-bar events.
+* **No drawings inside the engine.** `f_engine()` only returns numbers and booleans, a 41-element tuple, so it can run inside `request.security()`. All lines, labels and boxes are created on the chart from the engine's per-bar events.
 * **Non-repainting MTF.** `f_mtf()` returns the engine outputs shifted by `[1]` and is requested with `lookahead = barmerge.lookahead_on`, so every MTF value comes from a closed higher-timeframe bar. MTF zone events are de-duplicated by their origin time, so each zone is added once even though the value stays the same for the whole higher-timeframe bar.
 * **Cleanup of drawings.** Every drawing goes into a bounded array (`bosLines`, `bosLabels`, `liqLines`, `liqLabels`, `hlLabels`, `possDots`, `sigLabels`, zone arrays). When an array exceeds its limit, its oldest object is deleted. Fibonacci objects are deleted and redrawn on the last bar only.
 * **Timeframes.** MTFs should be greater than or equal to the chart timeframe. A lower MTF returns only its last intrabar value.
-* **Data Window.** Structure High, Structure Low, Retracement % and Chart Trend appear in the Data Window for inspection.
+* **Two retracement percentages.** `Retracement % (Last Base)` is measured against the last structure swing; the 23.6% trigger, BOS strength and Retrace signals use it. `Retracement % (Fib Base)` is measured against the CHoCH / Fib Condition base; the Fibonacci, Possible signals and the table use it. In Last Structure Base mode, or when the last swing is strong, the two are identical.
+* **Wick sweeps don't break structure.** A wick below `struct_low` that closes back above is a liquidity hunt, so a pullback can read slightly above 100% without a CHoCH.
+* **Data Window.** Structure High, Structure Low, both retracement percentages and Chart Trend appear in the Data Window for inspection.
+* **Verification.** The structure engine was ported line by line to Python and run on 5 × 20,000 synthetic bars, across every Retracement Condition × CHoCH Condition combination. Invariants checked on every bar: no close beyond a structure level without a BOS/CHoCH, non-negative BOS and Possible percentages, leg extremes always contain the current bar, and the struct high always above the struct low when a retracement starts.
 
 > Trading involves risk. This indicator is an analytical tool. It does not give financial advice, and its signals are not guaranteed outcomes.

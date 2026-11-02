@@ -61,7 +61,7 @@ ret_max_pct       = input.float(40.0, "Retrace Buy/Sell Max Retracement %", minv
 
 // ---- Group 6 : Supply / Demand
 show_sd         = input.bool(true, "Show Supply/Demand Zones", group = G6)
-sd_confirm_bars = input.int(5, "Zone Confirmation Candles", minval = 1, group = G6, tooltip = "A base candle becomes a zone after this many following candles never trade through its extreme and at least one of them closes beyond its opposite extreme.")
+sd_confirm_bars = input.int(5, "Zone Confirmation Candles", minval = 1, maxval = 100, group = G6, tooltip = "A base candle becomes a zone after this many following candles never trade through its extreme and at least one of them closes beyond its opposite extreme.")
 sd_detect_mode  = input.string("Both Supply/Demand", "Detection Mode", options = ["Both Supply/Demand", "Trend wise Supply/Demand", "Supply Only", "Demand Only"], group = G6)
 sd_to_show      = input.int(5, "Supply/Demand Structures to Show", minval = 1, maxval = 100, group = G6)
 sd_overlap      = input.bool(false, "Allow Overlapping Zones", group = G6)
@@ -130,8 +130,15 @@ C_POSS     = #e040fb
 
 // =====================================================================================
 // CORE ENGINE  (Reference Candle Absorption state machine + zone detection)
-//   Returns a 42-element tuple. Contains NO drawings so it can be used in request.security().
+//   Returns a 41-element tuple. Contains NO drawings so it can be used in request.security().
 //   trend: 1 = bullish, -1 = bearish, 0 = not yet initialised
+//
+//   Running extremes (bullish wording, bearish is the mirror):
+//     legH   : highest high of the current impulse
+//     oppExt : lowest low since legH                        (impulse phase)
+//     pbExt  : lowest low of the active retracement         (retracement phase)
+//     rb     : highest high since the current oppExt/pbExt  (rebound high)
+//     seg    : lowest low between the previous breakout and the current legH bar
 // =====================================================================================
 f_engine() =>
     // ---------- persistent state ----------
@@ -141,12 +148,16 @@ f_engine() =>
     var float refL        = na        // active Reference Candle low
     var bool  absorbed    = false     // reference candle absorbed against the trend
     var int   cnt         = 0         // non-inside counter-trend candles since absorption
-    var float legH        = na        // highest high of current bullish impulse
+    var float legH        = na
     var int   legHT       = na
-    var float legL        = na        // lowest low of current bearish impulse
+    var float legL        = na
     var int   legLT       = na
-    var float oppExt      = na        // up: lowest low since legH | down: highest high since legL
+    var float oppExt      = na
     var int   oppExtT     = na
+    var float rb          = na
+    var int   rbT         = na
+    var float seg         = na
+    var int   segT        = na
     var float sH          = na        // confirmed Structure High
     var int   sHT         = na
     var float sL          = na        // confirmed Structure Low
@@ -159,9 +170,9 @@ f_engine() =>
     var int   strongHT    = na
     var float strongL     = na        // last STRONG structure low
     var int   strongLT    = na
-    var float pbExt       = na        // retracement extreme (up: lowest low / down: highest high)
+    var float pbExt       = na
     var int   pbExtT      = na
-    var float bRefH       = na        // counter reference candle used for Possible High/Low
+    var float bRefH       = na        // counter-trend reference candle chain
     var float bRefL       = na
     var bool  possPending = false
     var float possLvl     = na
@@ -191,7 +202,6 @@ f_engine() =>
     float evPossLvl = na
     int   evPossT   = na
     float evPossPct = na
-    float curPct    = na
 
     // ---------- zone pre-calculation (called every bar for consistency) ----------
     int   N       = sd_confirm_bars
@@ -202,12 +212,12 @@ f_engine() =>
 
     // =========================== STATE MACHINE ===========================
     if na(refH)
-        refH    := high
-        refL    := low
-        legH    := high
-        legHT   := time
-        legL    := low
-        legLT   := time
+        refH  := high
+        refL  := low
+        legH  := high
+        legHT := time
+        legL  := low
+        legLT := time
     else if trend == 0
         // ---- bootstrap: first close outside the first reference candle sets the trend
         if high > legH
@@ -225,10 +235,12 @@ f_engine() =>
             strongL  := legL
             strongLT := legLT
             lastSwL  := legL
-            legH     := high
-            legHT    := time
             oppExt   := low
             oppExtT  := time
+            rb       := high
+            rbT      := time
+            seg      := legL
+            segT     := legLT
             refH     := high
             refL     := low
             lastEvt  := 2
@@ -241,28 +253,51 @@ f_engine() =>
             strongH  := legH
             strongHT := legHT
             lastSwH  := legH
-            legL     := low
-            legLT    := time
             oppExt   := high
             oppExtT  := time
+            rb       := low
+            rbT      := time
+            seg      := legH
+            segT     := legHT
             refH     := high
             refL     := low
             lastEvt  := 2
     else if trend == 1
         // ===================== BULLISH STRUCTURE =====================
+        // 1) running extremes (include this bar)
         if inRet
             if low < pbExt
                 pbExt  := low
                 pbExtT := time
+                rb     := high
+                rbT    := time
+            else if high > rb
+                rb  := high
+                rbT := time
         else
             if high > legH
+                // every low up to the new top belongs to the leg that started at the breakout
+                if oppExt < seg
+                    seg  := oppExt
+                    segT := oppExtT
+                if low < seg
+                    seg  := low
+                    segT := time
                 legH    := high
                 legHT   := time
                 oppExt  := low
                 oppExtT := time
+                rb      := high
+                rbT     := time
             else if low < oppExt
                 oppExt  := low
                 oppExtT := time
+                rb      := high
+                rbT     := time
+            else if high > rb
+                rb  := high
+                rbT := time
+        // 2) protected low for CHoCH (CHoCH / Fib Condition)
         bool  useStrongL = choch_cond == "Strong Structure Base" and not sLStrong and not na(strongL)
         float pl  = useStrongL ? strongL  : sL
         int   plT = useStrongL ? strongLT : sLT
@@ -276,8 +311,8 @@ f_engine() =>
                 evSwP   := legH
                 evSwT   := legHT
                 lastSwH := legH
-            float loSince  = inRet ? pbExt  : oppExt
-            int   loSinceT = inRet ? pbExtT : oppExtT
+            float loNow  = inRet ? pbExt  : oppExt
+            int   loNowT = inRet ? pbExtT : oppExtT
             trend       := -1
             sH          := legH
             sHT         := legHT
@@ -286,10 +321,14 @@ f_engine() =>
             strongH     := legH
             strongHT    := legHT
             sLValid     := false
-            legL        := na(loSince) ? low : math.min(loSince, low)
-            legLT       := (na(loSince) or low <= loSince) ? time : loSinceT
-            oppExt      := high
-            oppExtT     := time
+            legL        := loNow
+            legLT       := loNowT
+            oppExt      := rb
+            oppExtT     := rbT
+            rb          := low
+            rbT         := time
+            seg         := legH
+            segT        := legHT
             refH        := high
             refL        := low
             absorbed    := false
@@ -301,7 +340,6 @@ f_engine() =>
             lastEvt     := 2
             liqHDone    := false
             liqLDone    := false
-            curPct      := 0.0
         else if sHValid and close > sH
             // ---------- Bullish BOS ----------
             float rngB = sH - sL
@@ -326,10 +364,14 @@ f_engine() =>
                 strongLT := pbExtT
             sHValid     := false
             inRet       := false
-            legH        := high
-            legHT       := time
+            legH        := rb
+            legHT       := rbT
             oppExt      := low
             oppExtT     := time
+            rb          := high
+            rbT         := time
+            seg         := pbExt
+            segT        := pbExtT
             refH        := high
             refL        := low
             absorbed    := false
@@ -340,7 +382,6 @@ f_engine() =>
             lastEvt     := 1
             liqHDone    := false
             liqLDone    := false
-            curPct      := 0.0
         else
             // ---------- Liquidity hunts (wick through, close back inside) ----------
             if sHValid and not liqHDone and high > sH and close <= sH
@@ -348,38 +389,52 @@ f_engine() =>
                 evLiqLvl := sH
                 evLiqT   := sHT
                 liqHDone := true
-            else if sLValid and not liqLDone and low < pl and close >= pl
+            else if sLValid and not liqLDone and low < sL and close >= sL
                 evLiq    := -1
-                evLiqLvl := pl
-                evLiqT   := plT
+                evLiqLvl := sL
+                evLiqT   := sLT
                 liqLDone := true
             if not inRet
                 // ---------- Impulse phase: Reference Candle Absorption ----------
                 if close > refH
+                    // new bullish Reference Candle
                     refH     := high
                     refL     := low
                     absorbed := false
                     cnt      := 0
-                else
+                else if not absorbed
                     if close < refL
+                        // reference candle absorbed: 1st non-inside bearish candle
                         absorbed := true
-                    if absorbed and close < open and low < low[1]
-                        cnt += 1
+                        cnt      := 1
+                        bRefH    := high
+                        bRefL    := low
+                else if close < bRefL
+                    // next non-inside bearish candle (closes below the previous one)
+                    cnt   += 1
+                    bRefH := high
+                    bRefL := low
                 float rngI = legH - sL
-                curPct := rngI > 0 ? (legH - oppExt) / rngI * 100 : 0.0
-                bool c2 = absorbed and cnt >= 2
-                bool c3 = absorbed and curPct >= 23.6
-                bool startRet = retracement_cond == "Last Reference Candle Absorb" ? absorbed : retracement_cond == "2 Candle Retracement Method" ? c2 : retracement_cond == "Retrace confirm after 23.60%" ? c3 : (c2 and c3)
+                float pctI = rngI > 0 ? (legH - oppExt) / rngI * 100 : 0.0
+                bool  c2   = absorbed and cnt >= 2
+                bool  c3   = absorbed and pctI >= 23.6
+                bool  startRet = retracement_cond == "Last Reference Candle Absorb" ? absorbed : retracement_cond == "2 Candle Retracement Method" ? c2 : retracement_cond == "Retrace confirm after 23.60%" ? c3 : (c2 and c3)
                 if startRet
-                    inRet       := true
-                    sH          := legH
-                    sHT         := legHT
-                    sHValid     := true
-                    liqHDone    := false
+                    inRet    := true
+                    sH       := legH
+                    sHT      := legHT
+                    sHValid  := true
+                    liqHDone := false
+                    // lock Structure Low = lowest point between previous breakout and Structure High
+                    if not na(seg) and seg < sL
+                        sL       := seg
+                        sLT      := segT
+                        liqLDone := false
+                        if sLStrong
+                            strongL  := seg
+                            strongLT := segT
                     pbExt       := oppExt
                     pbExtT      := oppExtT
-                    bRefH       := high
-                    bRefL       := low
                     possPending := true
                     possLvl     := na
                     evRet       := 1
@@ -389,37 +444,55 @@ f_engine() =>
                     lastSwH     := legH
             else
                 // ---------- Retracement phase: Possible Low tracking ----------
-                if close < bRefL
-                    bRefH       := high
-                    bRefL       := low
+                if possPending
+                    if close < bRefL
+                        bRefH := high
+                        bRefL := low
+                    else if close > bRefH
+                        possPending := false
+                        possLvl     := pbExt
+                        evPoss      := 1
+                        evPossLvl   := pbExt
+                        evPossT     := pbExtT
+                        evPossPct   := (sH - pl) > 0 ? (sH - pbExt) / (sH - pl) * 100 : 0.0
+                else if not na(possLvl) and low < possLvl
+                    // price dropped below the last Possible Low: re-arm on this candle
                     possPending := true
-                else if possPending and close > bRefH
-                    possPending := false
                     bRefH       := high
                     bRefL       := low
-                    if na(possLvl) or pbExt < possLvl
-                        possLvl   := pbExt
-                        evPoss    := 1
-                        evPossLvl := pbExt
-                        evPossT   := pbExtT
-                        evPossPct := (sH - sL) > 0 ? (sH - pbExt) / (sH - sL) * 100 : 0.0
-                float rngR = sH - sL
-                curPct := rngR > 0 ? (sH - pbExt) / rngR * 100 : 0.0
     else
         // ===================== BEARISH STRUCTURE =====================
         if inRet
             if high > pbExt
                 pbExt  := high
                 pbExtT := time
+                rb     := low
+                rbT    := time
+            else if low < rb
+                rb  := low
+                rbT := time
         else
             if low < legL
+                if oppExt > seg
+                    seg  := oppExt
+                    segT := oppExtT
+                if high > seg
+                    seg  := high
+                    segT := time
                 legL    := low
                 legLT   := time
                 oppExt  := high
                 oppExtT := time
+                rb      := low
+                rbT     := time
             else if high > oppExt
                 oppExt  := high
                 oppExtT := time
+                rb      := low
+                rbT     := time
+            else if low < rb
+                rb  := low
+                rbT := time
         bool  useStrongH = choch_cond == "Strong Structure Base" and not sHStrong and not na(strongH)
         float ph  = useStrongH ? strongH  : sH
         int   phT = useStrongH ? strongHT : sHT
@@ -433,8 +506,8 @@ f_engine() =>
                 evSwP   := legL
                 evSwT   := legLT
                 lastSwL := legL
-            float hiSince  = inRet ? pbExt  : oppExt
-            int   hiSinceT = inRet ? pbExtT : oppExtT
+            float hiNow  = inRet ? pbExt  : oppExt
+            int   hiNowT = inRet ? pbExtT : oppExtT
             trend       := 1
             sL          := legL
             sLT         := legLT
@@ -443,10 +516,14 @@ f_engine() =>
             strongL     := legL
             strongLT    := legLT
             sHValid     := false
-            legH        := na(hiSince) ? high : math.max(hiSince, high)
-            legHT       := (na(hiSince) or high >= hiSince) ? time : hiSinceT
-            oppExt      := low
-            oppExtT     := time
+            legH        := hiNow
+            legHT       := hiNowT
+            oppExt      := rb
+            oppExtT     := rbT
+            rb          := high
+            rbT         := time
+            seg         := legL
+            segT        := legLT
             refH        := high
             refL        := low
             absorbed    := false
@@ -458,7 +535,6 @@ f_engine() =>
             lastEvt     := 2
             liqHDone    := false
             liqLDone    := false
-            curPct      := 0.0
         else if sLValid and close < sL
             // ---------- Bearish BOS ----------
             float rngD = sH - sL
@@ -483,10 +559,14 @@ f_engine() =>
                 strongHT := pbExtT
             sLValid     := false
             inRet       := false
-            legL        := low
-            legLT       := time
+            legL        := rb
+            legLT       := rbT
             oppExt      := high
             oppExtT     := time
+            rb          := low
+            rbT         := time
+            seg         := pbExt
+            segT        := pbExtT
             refH        := high
             refL        := low
             absorbed    := false
@@ -497,44 +577,55 @@ f_engine() =>
             lastEvt     := 1
             liqHDone    := false
             liqLDone    := false
-            curPct      := 0.0
         else
             if sLValid and not liqLDone and low < sL and close >= sL
                 evLiq    := -1
                 evLiqLvl := sL
                 evLiqT   := sLT
                 liqLDone := true
-            else if sHValid and not liqHDone and high > ph and close <= ph
+            else if sHValid and not liqHDone and high > sH and close <= sH
                 evLiq    := 1
-                evLiqLvl := ph
-                evLiqT   := phT
+                evLiqLvl := sH
+                evLiqT   := sHT
                 liqHDone := true
             if not inRet
                 if close < refL
+                    // new bearish Reference Candle
                     refH     := high
                     refL     := low
                     absorbed := false
                     cnt      := 0
-                else
+                else if not absorbed
                     if close > refH
                         absorbed := true
-                    if absorbed and close > open and high > high[1]
-                        cnt += 1
+                        cnt      := 1
+                        bRefH    := high
+                        bRefL    := low
+                else if close > bRefH
+                    cnt   += 1
+                    bRefH := high
+                    bRefL := low
                 float rngI2 = sH - legL
-                curPct := rngI2 > 0 ? (oppExt - legL) / rngI2 * 100 : 0.0
-                bool d2 = absorbed and cnt >= 2
-                bool d3 = absorbed and curPct >= 23.6
-                bool startRetD = retracement_cond == "Last Reference Candle Absorb" ? absorbed : retracement_cond == "2 Candle Retracement Method" ? d2 : retracement_cond == "Retrace confirm after 23.60%" ? d3 : (d2 and d3)
+                float pctI2 = rngI2 > 0 ? (oppExt - legL) / rngI2 * 100 : 0.0
+                bool  d2    = absorbed and cnt >= 2
+                bool  d3    = absorbed and pctI2 >= 23.6
+                bool  startRetD = retracement_cond == "Last Reference Candle Absorb" ? absorbed : retracement_cond == "2 Candle Retracement Method" ? d2 : retracement_cond == "Retrace confirm after 23.60%" ? d3 : (d2 and d3)
                 if startRetD
-                    inRet       := true
-                    sL          := legL
-                    sLT         := legLT
-                    sLValid     := true
-                    liqLDone    := false
+                    inRet    := true
+                    sL       := legL
+                    sLT      := legLT
+                    sLValid  := true
+                    liqLDone := false
+                    // lock Structure High = highest point between previous breakout and Structure Low
+                    if not na(seg) and seg > sH
+                        sH       := seg
+                        sHT      := segT
+                        liqHDone := false
+                        if sHStrong
+                            strongH  := seg
+                            strongHT := segT
                     pbExt       := oppExt
                     pbExtT      := oppExtT
-                    bRefH       := high
-                    bRefL       := low
                     possPending := true
                     possLvl     := na
                     evRet       := -1
@@ -544,22 +635,58 @@ f_engine() =>
                     lastSwL     := legL
             else
                 // ---------- Retracement phase: Possible High tracking ----------
-                if close > bRefH
-                    bRefH       := high
-                    bRefL       := low
+                if possPending
+                    if close > bRefH
+                        bRefH := high
+                        bRefL := low
+                    else if close < bRefL
+                        possPending := false
+                        possLvl     := pbExt
+                        evPoss      := -1
+                        evPossLvl   := pbExt
+                        evPossT     := pbExtT
+                        evPossPct   := (ph - sL) > 0 ? (pbExt - sL) / (ph - sL) * 100 : 0.0
+                else if not na(possLvl) and high > possLvl
                     possPending := true
-                else if possPending and close < bRefL
-                    possPending := false
                     bRefH       := high
                     bRefL       := low
-                    if na(possLvl) or pbExt > possLvl
-                        possLvl   := pbExt
-                        evPoss    := -1
-                        evPossLvl := pbExt
-                        evPossT   := pbExtT
-                        evPossPct := (sH - sL) > 0 ? (pbExt - sL) / (sH - sL) * 100 : 0.0
-                float rngR2 = sH - sL
-                curPct := rngR2 > 0 ? (pbExt - sL) / rngR2 * 100 : 0.0
+
+    // =========================== OUTPUTS FROM FINAL STATE ===========================
+    //   curPct : pullback % of the current leg vs. the LAST structure base (BOS strength, retrace signals)
+    //   fibPct : pullback % vs. the CHoCH / Fib Condition base (Fibonacci, Possible signals, table)
+    float curPct = na
+    float fibPct = na
+    float outH   = na
+    float outL   = na
+    float fibTop = na
+    float fibBot = na
+    int   fibT0  = na
+    if trend == 1
+        bool  uStrong = choch_cond == "Strong Structure Base" and not sLStrong and not na(strongL)
+        float uBase   = uStrong ? strongL  : sL
+        int   uBaseT  = uStrong ? strongLT : sLT
+        float uTop    = inRet ? sH : legH
+        float uLow    = inRet ? pbExt : oppExt
+        outH   := uTop
+        outL   := sL
+        curPct := (uTop - sL) > 0 ? (uTop - uLow) / (uTop - sL) * 100 : 0.0
+        fibPct := (uTop - uBase) > 0 ? (uTop - uLow) / (uTop - uBase) * 100 : 0.0
+        fibTop := uTop
+        fibBot := uBase
+        fibT0  := uBaseT
+    else if trend == -1
+        bool  dStrong = choch_cond == "Strong Structure Base" and not sHStrong and not na(strongH)
+        float dBase   = dStrong ? strongH  : sH
+        int   dBaseT  = dStrong ? strongHT : sHT
+        float dBot    = inRet ? sL : legL
+        float dHigh   = inRet ? pbExt : oppExt
+        outH   := sH
+        outL   := dBot
+        curPct := (sH - dBot) > 0 ? (dHigh - dBot) / (sH - dBot) * 100 : 0.0
+        fibPct := (dBase - dBot) > 0 ? (dHigh - dBot) / (dBase - dBot) * 100 : 0.0
+        fibTop := dBase
+        fibBot := dBot
+        fibT0  := dBaseT
 
     // =========================== ZONE DETECTION ===========================
     float dzTop = na
@@ -597,28 +724,25 @@ f_engine() =>
     if wantBF and low > high[2]
         bfTop := low
         bfBot := high[2]
-        bfX   := time[1]
+        bfX   := time[2]
     if wantSF and high < low[2]
         sfTop := low[2]
         sfBot := high
-        sfX   := time[1]
+        sfX   := time[2]
 
-    int   status = trend == 0 ? 0 : inRet ? 3 : lastEvt
-    float fibTop = trend == 1 ? (inRet ? sH : legH) : trend == -1 ? sH : na
-    float fibBot = trend == 1 ? sL : trend == -1 ? (inRet ? sL : legL) : na
-    int   fibT0  = trend == 1 ? sLT : trend == -1 ? sHT : na
+    int status = trend == 0 ? 0 : inRet ? 3 : lastEvt
 
-    [trend, inRet, status, curPct, sH, sL, sHT, sLT, evBos, evChoch, evLvl, evLvlT, evPct, evStrong, evRet, evSw, evSwP, evSwT, evSwStr, evLiq, evLiqLvl, evLiqT, evPoss, evPossLvl, evPossT, evPossPct, bosSince, fibTop, fibBot, fibT0, dzTop, dzBot, dzX, szTop, szBot, szX, bfTop, bfBot, bfX, sfTop, sfBot, sfX]
+    [trend, inRet, status, curPct, fibPct, outH, outL, evBos, evChoch, evLvl, evLvlT, evPct, evStrong, evRet, evSw, evSwP, evSwT, evSwStr, evLiq, evLiqLvl, evLiqT, evPoss, evPossLvl, evPossT, evPossPct, bosSince, fibTop, fibBot, fibT0, dzTop, dzBot, dzX, szTop, szBot, szX, bfTop, bfBot, bfX, sfTop, sfBot, sfX]
 
 // Non-repainting MTF wrapper: values of the last CONFIRMED higher-timeframe bar.
 f_mtf() =>
-    [xTr, xIr, xSt, xRp, xH, xL, xHT, xLT, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19, b20, b21, b22, z1, z2, z3, z4, z5, z6, z7, z8, z9, z10, z11, z12] = f_engine()
-    [xTr[1], xSt[1], xRp[1], xH[1], xL[1], z1[1], z2[1], z3[1], z4[1], z5[1], z6[1], z7[1], z8[1], z9[1], z10[1], z11[1], z12[1]]
+    [xTr, xIr, xSt, xCp, xFp, xH, xL, k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11, k12, k13, k14, k15, k16, k17, k18, k19, k20, k21, k22, z1, z2, z3, z4, z5, z6, z7, z8, z9, z10, z11, z12] = f_engine()
+    [xTr[1], xSt[1], xFp[1], xH[1], xL[1], z1[1], z2[1], z3[1], z4[1], z5[1], z6[1], z7[1], z8[1], z9[1], z10[1], z11[1], z12[1]]
 
 // =====================================================================================
 // ENGINE CALLS
 // =====================================================================================
-[cTrend, cInRet, cStatus, cRetPct, cSH, cSL, cSHT, cSLT, eBos, eChoch, eLvl, eLvlT, ePct, eStrong, eRet, eSw, eSwP, eSwT, eSwStr, eLiq, eLiqLvl, eLiqT, ePoss, ePossLvl, ePossT, ePossPct, cBosSince, fTop, fBot, fT0, cDzT, cDzB, cDzX, cSzT, cSzB, cSzX, cBfT, cBfB, cBfX, cSfT, cSfB, cSfX] = f_engine()
+[cTrend, cInRet, cStatus, cRetPct, cFibPct, cSH, cSL, eBos, eChoch, eLvl, eLvlT, ePct, eStrong, eRet, eSw, eSwP, eSwT, eSwStr, eLiq, eLiqLvl, eLiqT, ePoss, ePossLvl, ePossT, ePossPct, cBosSince, fTop, fBot, fT0, cDzT, cDzB, cDzX, cSzT, cSzB, cSzX, cBfT, cBfB, cBfX, cSfT, cSfB, cSfX] = f_engine()
 
 [m1Tr, m1St, m1Rp, m1H, m1L, m1DzT, m1DzB, m1DzX, m1SzT, m1SzB, m1SzX, m1BfT, m1BfB, m1BfX, m1SfT, m1SfB, m1SfX] = request.security(syminfo.tickerid, mtf1, f_mtf(), lookahead = barmerge.lookahead_on)
 [m2Tr, m2St, m2Rp, m2H, m2L, m2DzT, m2DzB, m2DzX, m2SzT, m2SzB, m2SzX, m2BfT, m2BfB, m2BfX, m2SfT, m2SfB, m2SfX] = request.security(syminfo.tickerid, mtf2, f_mtf(), lookahead = barmerge.lookahead_on)
@@ -630,7 +754,7 @@ f_mtf() =>
 f_tfName(string _tf) =>
     string _t = _tf == "" ? timeframe.period : _tf
     int _s = timeframe.in_seconds(_t)
-    _s < 60 ? str.tostring(_s) + "s" : _s < 3600 ? str.tostring(_s / 60, "#") + "m" : _s < 86400 ? str.tostring(_s / 3600, "#") + "H" : _t
+    _s < 60 ? str.tostring(_s) + "s" : _s < 3600 ? str.tostring(_s / 60.0, "#.##") + "m" : _s < 86400 ? str.tostring(_s / 3600.0, "#.##") + "H" : _t
 
 f_pushLine(array<line> _a, line _l, int _max) =>
     array.push(_a, _l)
@@ -778,17 +902,18 @@ f_zoneInfo(Zone _z) =>
 f_lot(float _entry, float _sl) =>
     float _dist  = math.abs(_entry - _sl)
     float _raw   = (na(_dist) or _dist <= 0) ? na : sl_risk_usd / (_dist * contract_size)
-    float _lot   = na(_raw) ? na : lot_rounding == "2 Decimal Round Figure" ? math.round(_raw, 2) : math.floor(_raw * 100) / 100
+    float _lot   = na(_raw) ? na : lot_rounding == "2 Decimal Round Figure" ? math.round(_raw, 2) : math.floor(_raw * 100.0 + 1e-9) / 100.0
     bool  _below = not na(_lot) and _lot < min_lot
     float _fin   = na(_lot) ? na : _below ? _lot : math.min(_lot, max_lot)
     [_fin, _below, _raw]
 
-f_signal(int _dir, string _kind, float _sl, float _tp, string _zinfo, float _pct, bool _show) =>
+f_signal(int _dir, string _kind, float _sl, float _tp, string _zinfo, float _pct, bool _show, array<label> _store) =>
     [_lot, _below, _raw] = f_lot(close, _sl)
     string _lotTxt = na(_lot) ? "Lot: n/a" : _below ? "Lot < Min" : "Lot: " + str.tostring(_lot, "#.##")
     string _tip = _kind + "\nEntry: " + str.tostring(close, format.mintick) + "\nSL Price: " + str.tostring(_sl, format.mintick) + "\nTP (Structure " + (_dir == 1 ? "High" : "Low") + "): " + str.tostring(_tp, format.mintick) + "\nRetracement: " + str.tostring(_pct, "#.0") + "%" + "\nZone: " + _zinfo + "\nRaw Lot: " + str.tostring(_raw, "#.####") + "\n" + _lotTxt
-    label _lb = _show ? label.new(time, _dir == 1 ? low : high, _kind + "\n" + _lotTxt, xloc = xloc.bar_time, yloc = _dir == 1 ? yloc.belowbar : yloc.abovebar, style = _dir == 1 ? label.style_label_up : label.style_label_down, color = _dir == 1 ? C_BULL : C_BEAR, textcolor = color.white, size = size.small, tooltip = _tip) : na
-    [_lb, _tip]
+    if _show
+        f_pushLabel(_store, label.new(time, _dir == 1 ? low : high, _kind + "\n" + _lotTxt, xloc = xloc.bar_time, yloc = _dir == 1 ? yloc.belowbar : yloc.abovebar, style = _dir == 1 ? label.style_label_up : label.style_label_down, color = _dir == 1 ? C_BULL : C_BEAR, textcolor = color.white, size = size.small, tooltip = _tip), bos_keep)
+    _tip
 
 // =====================================================================================
 // STRUCTURE DRAWINGS
@@ -807,13 +932,13 @@ if eBos != 0 and show_bos_labels and not na(eLvlT)
     color _c = eBos == 1 ? C_BULL : C_BEAR
     f_pushLine(bosLines, line.new(eLvlT, eLvl, time, eLvl, xloc = xloc.bar_time, color = _c, style = line.style_solid, width = 1), bos_keep)
     string _t = "BOS (" + (eStrong ? "Strong" : "Weak") + ") - " + str.tostring(ePct, "#.0") + "%"
-    f_pushLabel(bosLabels, label.new(math.round((eLvlT + time) / 2), eLvl, _t, xloc = xloc.bar_time, style = eBos == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _c, size = size.small), bos_keep)
+    f_pushLabel(bosLabels, label.new(eLvlT + math.round((time - eLvlT) / 2.0), eLvl, _t, xloc = xloc.bar_time, style = eBos == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _c, size = size.small), bos_keep)
 
 // ---- CHoCH ----
 if eChoch != 0 and show_choch_labels and not na(eLvlT)
     color _c = eChoch == 1 ? C_BULL : C_BEAR
     f_pushLine(bosLines, line.new(eLvlT, eLvl, time, eLvl, xloc = xloc.bar_time, color = _c, style = line.style_dashed, width = 1), bos_keep)
-    f_pushLabel(bosLabels, label.new(math.round((eLvlT + time) / 2), eLvl, "CHoCH", xloc = xloc.bar_time, style = eChoch == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _c, size = size.small), bos_keep)
+    f_pushLabel(bosLabels, label.new(eLvlT + math.round((time - eLvlT) / 2.0), eLvl, "CHoCH", xloc = xloc.bar_time, style = eChoch == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = _c, size = size.small), bos_keep)
 
 // ---- Liquidity hunts ----
 if eLiq != 0 and show_liq_labels and not na(eLiqT)
@@ -869,9 +994,7 @@ if ePoss != 0 and ePoss == cTrend
         float _sl   = _dir == 1 ? (_useZ ? _z.bot : cSL) : (_useZ ? _z.top : cSH)
         float _tp   = _dir == 1 ? cSH : cSL
         string _kind = _dir == 1 ? "Possible Buy" : "Possible Sell"
-        [_lb, _tip] = f_signal(_dir, _kind, _sl, _tp, _useZ ? f_zoneInfo(_z) : "Filter off / none", ePossPct, show_poss_sig)
-        if not na(_lb)
-            f_pushLabel(sigLabels, _lb, bos_keep)
+        string _tip = f_signal(_dir, _kind, _sl, _tp, _useZ ? f_zoneInfo(_z) : "Filter off / none", ePossPct, show_poss_sig, sigLabels)
         if alert_poss_sig
             alert("STM " + _kind + " | " + syminfo.ticker + " " + tfC + "\n" + _tip, alert.freq_once_per_bar_close)
 
@@ -888,9 +1011,7 @@ if eRet != 0 and cRetPct <= ret_max_pct
         float _sl   = _dir == 1 ? (_useZ ? _z.bot : cSL) : (_useZ ? _z.top : cSH)
         float _tp   = _dir == 1 ? cSH : cSL
         string _kind = _dir == 1 ? "Retrace Buy" : "Retrace Sell"
-        [_lb, _tip] = f_signal(_dir, _kind, _sl, _tp, _useZ ? f_zoneInfo(_z) : "Filter off / none", cRetPct, show_ret_sig)
-        if not na(_lb)
-            f_pushLabel(sigLabels, _lb, bos_keep)
+        string _tip = f_signal(_dir, _kind, _sl, _tp, _useZ ? f_zoneInfo(_z) : "Filter off / none", cRetPct, show_ret_sig, sigLabels)
         if alert_ret_sig
             alert("STM " + _kind + " | " + syminfo.ticker + " " + tfC + "\n" + _tip, alert.freq_once_per_bar_close)
 
@@ -950,7 +1071,7 @@ if barstate.islast
         table.cell(tbl, 3, 0, "Ret %", text_color = C_NEUTRAL, text_size = tblSize)
         table.cell(tbl, 4, 0, "High Price", text_color = C_NEUTRAL, text_size = tblSize)
         table.cell(tbl, 5, 0, "Low Price", text_color = C_NEUTRAL, text_size = tblSize)
-        f_row(1, "Chart " + tfC, cTrend, cStatus, cRetPct, cSH, cSL)
+        f_row(1, "Chart " + tfC, cTrend, cStatus, cFibPct, cSH, cSL)
         f_row(2, "MTF 1 " + tfM1, m1Tr, m1St, m1Rp, m1H, m1L)
         f_row(3, "MTF 2 " + tfM2, m2Tr, m2St, m2Rp, m2H, m2L)
         f_row(4, "MTF 3 " + tfM3, m3Tr, m3St, m3Rp, m3H, m3L)
@@ -986,5 +1107,6 @@ prevAlign := mtfAlign
 // =====================================================================================
 plot(cSH,     "Structure High",  color = C_BEAR, display = display.data_window)
 plot(cSL,     "Structure Low",   color = C_BULL, display = display.data_window)
-plot(cRetPct, "Retracement %",   color = C_NEUTRAL, display = display.data_window)
+plot(cRetPct, "Retracement % (Last Base)", color = C_NEUTRAL, display = display.data_window)
+plot(cFibPct, "Retracement % (Fib Base)",  color = C_NEUTRAL, display = display.data_window)
 plot(cTrend,  "Chart Trend",     color = C_NEUTRAL, display = display.data_window)
