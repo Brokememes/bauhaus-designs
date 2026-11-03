@@ -1,0 +1,62 @@
+name: Deploy to Wix
+
+# Every push to main uploads the whole site to the Wix headless site.
+# The upload replaces all files on Wix, so files deleted here disappear there too.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-wix
+  cancel-in-progress: false
+
+env:
+  # Wix site that serves this repo (headless "Bauhaus Designs" site)
+  WIX_SITE_ID: 877734f3-8b47-44e6-833b-3525fe86302c
+  WIX_CLI: "@wix/cli@1.2.8"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check index.html exists
+        run: test -f index.html
+
+      - name: Zip the site
+        run: |
+          zip -r -q site.zip . -x '.git/*' '.github/*' 'site.zip' 'README*' '*.md'
+          ls -lh site.zip
+
+      - name: Log in to Wix
+        env:
+          WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
+        run: |
+          if [ -z "$WIX_API_KEY" ]; then echo "::error::WIX_API_KEY secret is missing"; exit 1; fi
+          npx --yes "$WIX_CLI" login --api-key "$WIX_API_KEY"
+
+      - name: Upload to Wix and go live
+        run: |
+          TOKEN="$(npx --yes "$WIX_CLI" token)"
+          echo "::add-mask::$TOKEN"
+          HTTP_CODE=$(curl -sS -o response.json -w '%{http_code}' -X POST \
+            "https://www.wixapis.com/headless-business-setup/v1/headless-business/${WIX_SITE_ID}/drop?campaign=mcp&agent=github-actions" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -F "files=@site.zip;filename=site.zip")
+          echo "HTTP ${HTTP_CODE}"
+          cat response.json; echo
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then exit 1; fi
+
+      - name: Check the live site answers
+        run: |
+          URL=$(node -e "console.log(require('./response.json').siteUrl || '')")
+          if [ -n "$URL" ]; then
+            sleep 10
+            curl -sS -o /dev/null -w "Live site ${URL} -> HTTP %{http_code}\n" "$URL"
+          fi
